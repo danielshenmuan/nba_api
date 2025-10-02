@@ -1,0 +1,5 @@
+pandas
+numpy
+google-cloud-bigquery
+db-dtypes
+nba_api

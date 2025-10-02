@@ -1,0 +1,9 @@
+fastapi==0.115.2
+uvicorn==0.30.6
+nba_api==1.7.0
+pandas==2.2.2
+python-dateutil==2.9.0.post0
+requests-cache==1.2.1
+requests
+google-cloud-bigquery
+db-dtypes
