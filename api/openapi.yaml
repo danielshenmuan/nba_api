@@ -1,0 +1,29 @@
+openapi: 3.0.3
+info: { title: NBA GBQ API, version: 1.2.0 }
+servers:
+  - url: https://nba-gbq-api-896368614747.us-central1.run.app
+paths:
+  /health:
+    get: { operationId: healthCheck, responses: { '200': { description: OK } } }
+  /daily_leaders:
+    get:
+      operationId: getDailyLeaders
+      parameters:
+        - { name: game_date, in: query, required: true, schema: { type: string, format: date } }
+        - { name: limit, in: query, schema: { type: integer, default: 10 } }
+        - { name: mode, in: query, schema: { type: string, enum: [best, worst], default: best } }
+        - { name: min_minutes, in: query, schema: { type: integer, default: 20 } }
+      responses: { '200': { description: OK } }
+  /player_timeseries:
+    get:
+      operationId: getPlayerTimeSeries
+      parameters:
+        - name: player_id
+          in: query
+          required: true
+          schema: { type: array, items: { type: integer } }
+          style: form
+          explode: true
+        - { name: start_date, in: query, required: true, schema: { type: string, format: date } }
+        - { name: end_date, in: query, required: true, schema: { type: string, format: date } }
+      responses: { '200': { description: OK } }
