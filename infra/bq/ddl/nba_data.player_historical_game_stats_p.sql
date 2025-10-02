@@ -1,0 +1,36 @@
+CREATE TABLE `fantasy-survivor-app.nba_data.player_historical_game_stats_p`
+(
+  game_id INT64,
+  team_id INT64,
+  team_abbreviation STRING,
+  player_id INT64,
+  player_name STRING,
+  start_position STRING,
+  comment STRING,
+  minute FLOAT64,
+  fg_made INT64,
+  fg_attempts INT64,
+  fg_pct FLOAT64,
+  three_p_made INT64,
+  three_p_attempts INT64,
+  three_p_pct FLOAT64,
+  ft_made INT64,
+  ft_attempts INT64,
+  ft_pct FLOAT64,
+  offensive_rebounds INT64,
+  defensive_rebounds INT64,
+  rebounds INT64,
+  assists INT64,
+  steals INT64,
+  blocks INT64,
+  turnovers INT64,
+  personal_fouls INT64,
+  points INT64,
+  plus_minus FLOAT64,
+  double_double BOOL,
+  triple_double BOOL,
+  season STRING,
+  game_date DATE
+)
+PARTITION BY game_date
+CLUSTER BY player_id;

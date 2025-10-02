@@ -1,0 +1,27 @@
+{
+  "table": "fantasy-survivor-app.nba_data.game_log_2024_25",
+  "type": "BASE TABLE",
+  "partitioning": null,
+  "partition_field": null,
+  "clustering_fields": null,
+  "schema": [
+    {
+      "name": "GAME_ID",
+      "type": "STRING",
+      "mode": "NULLABLE",
+      "description": ""
+    },
+    {
+      "name": "GAME_DATE",
+      "type": "DATE",
+      "mode": "NULLABLE",
+      "description": ""
+    },
+    {
+      "name": "SEASON",
+      "type": "STRING",
+      "mode": "NULLABLE",
+      "description": ""
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+CREATE TABLE `fantasy-survivor-app.nba_data.player_historical_game_stats_zscore`
+(
+  player_id INT64,
+  game_id INT64,
+  points_z FLOAT64,
+  rebounds_z FLOAT64,
+  assists_z FLOAT64,
+  steals_z FLOAT64,
+  blocks_z FLOAT64,
+  turnovers_z FLOAT64,
+  three_p_made_z FLOAT64,
+  personal_fouls_z FLOAT64,
+  double_double_z FLOAT64,
+  offensive_rebounds_z FLOAT64,
+  fg_made_z FLOAT64,
+  ft_made_z FLOAT64,
+  fg_pct_z FLOAT64,
+  ft_pct_z FLOAT64,
+  three_p_pct_z FLOAT64,
+  assist_to_ratio_z FLOAT64,
+  fg_attempts_z FLOAT64,
+  ft_attempts_z FLOAT64,
+  three_p_attempts_z FLOAT64,
+  z_9cat FLOAT64,
+  z_9cat_minus1 FLOAT64
+);
