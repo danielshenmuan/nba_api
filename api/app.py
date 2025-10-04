@@ -1,49 +1,24 @@
-from fastapi import FastAPI, Query, HTTPException
+from fastapi import FastAPI, Query, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.encoders import jsonable_encoder
+from typing import List, Optional, Union
 from fastapi.responses import PlainTextResponse
 from pathlib import Path
 from service.nba_fetch import get_daily_leaders, get_player_time_series
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
 from typing import List, Optional
 import math
-from typing import Union
 from service.player_lookup import search_players
+from fastapi.encoders import jsonable_encoder
+import re
+
 
 app = FastAPI(openapi_url="/openapi.json", docs_url="/docs")
 
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import PlainTextResponse
-import yaml
 
-@app.get("/openapi.yaml", include_in_schema=False)
-def openapi_yaml_runtime():
-    schema = get_openapi(
-        title=app.title,
-        version=app.version,
-        description=getattr(app, "description", None),
-        routes=app.routes,
-    )
-    # Explicit servers entry required by GPT Actions
-    schema["servers"] = [{"url": "https://nba-gbq-api-896368614747.us-central1.run.app"}]
-    return PlainTextResponse(
-        yaml.safe_dump(schema, sort_keys=False),
-        media_type="text/yaml",
-    )
-
-@app.get("/openapi.yaml", include_in_schema=False)
-def openapi_yaml():
-    return PlainTextResponse(
-        Path(__file__).with_name("openapi.yaml").read_text(),
-        media_type="text/yaml"
-    )
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],      # tighten later if desired
-    allow_methods=["GET", "OPTIONS"],
-    allow_headers=["*"],
-)
 ##############
 
 def sanitize_response(obj):
@@ -59,12 +34,18 @@ def sanitize_response(obj):
     else:
         return obj
 
+def _parse_date(s: str) -> date:
+    try:
+        return datetime.strptime(s, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid date '{s}'. Use YYYY-MM-DD.")
+
 @app.get("/health", operation_id="healthCheck")
 def health():
     return {"status": "ok", "service": "nba-gbq-api"}
 
 
-@app.get("/players_search", operation_id="playersSearch")
+@app.get("/players_search", operation_id="playersSearch", description="Resolve player names/nicknames to player_id with confidence.")
 def players_search(q: str = Query(..., min_length=2), limit: int = Query(5, ge=1, le=10)):
     return {"query": q, "matches": search_players(q, limit=limit)}
 
@@ -97,71 +78,49 @@ def daily_leaders(
         "leaders": leaders,
     }
     return JSONResponse(
-        sanitize_response(payload),
+        content=jsonable_encoder(sanitize_response(payload)),
         headers={"Cache-Control": "public, max-age=600"},
     )
 
-@app.get("/player_timeseries", operation_id="getPlayerTimeSeries")
+@app.get(
+    "/player_timeseries",
+    operation_id="getPlayerTimeSeries",
+    description="STRICT: one player_id, one start_date, one end_date. Resolve names via /players_search first."
+)
 def player_timeseries(
-    player_id: Optional[List[int]] = Query(None, alias="player_id", description="One or more player IDs"),
-    player_name: Optional[List[str]] = Query(None, alias="player_name", description="One or more player names or nicknames"),
-    start_date: Optional[date] = Query(None),
-    end_date: Optional[date] = Query(None),
-    limit: Optional[int] = Query(None, ge=1, le=2000),  # simple per-player cap
+    request: Request,
+    player_id: str = Query(..., alias="player_id", description="Single player ID (integer)"),
+    start_date: str = Query(..., description="YYYY-MM-DD"),
+    end_date: str = Query(..., description="YYYY-MM-DD"),
+    limit: Optional[int] = Query(None, ge=1, le=2000),
 ):
-    """
-    Time series stats & z-scores for one or more players between start_date and end_date.
-    Supports:
-      - ?player_id=2544&player_id=201939
-      - ?player_name=Dame&player_name=Stephen%20Curry
-    """
-    try:
-        # Resolve names -> IDs (keep original behavior otherwise)
-        resolved_ids: List[int] = list(player_id or [])
-
-        if player_name:
-            for name in player_name:
-                matches = search_players(name, limit=3)  # returns [{player_id, full_name, confidence, reason}, ...]
-                if not matches:
-                    raise HTTPException(status_code=404, detail=f"No player match for '{name}'.")
-                top = matches[0]
-                # accept high-confidence or explicit alias/exact/unique_last
-                if top.get("confidence", 0) >= 0.90 or top.get("reason") in {"alias", "exact", "unique_last"}:
-                    resolved_ids.append(int(top["player_id"]))
-                else:
-                    cand = ", ".join(f"{m['full_name']} ({m['player_id']})" for m in matches)
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Name '{name}' is ambiguous. Candidates: {cand}. Please specify player_id."
-                    )
-
-        # de-dup while preserving order
-        seen = set()
-        resolved_ids = [pid for pid in resolved_ids if not (pid in seen or seen.add(pid))]
-
-        if not resolved_ids:
-            raise HTTPException(status_code=400, detail="Provide at least one player_id or player_name.")
-
-        players = []
-        for pid in resolved_ids:
-            ts = get_player_time_series(pid, start_date, end_date)  # existing service fn
-            if isinstance(ts, list) and limit:
-                ts = ts[:limit]
-            players.append({
-                "player_id": pid,
-                "series": ts,
-            })
-
-        payload = {
-            "player_ids": resolved_ids,
-            "start_date": start_date,
-            "end_date": end_date,
-            "players": players,
-        }
-        return JSONResponse(
-            sanitize_response(payload),
-            headers={"Cache-Control": "public, max-age=600"},
+    # Names are not allowed here
+    if "player_name" in request.query_params:
+        raise HTTPException(
+            status_code=400,
+            detail="Use /players_search to resolve names → player_id, then call /player_timeseries with player_id only."
         )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
 
+    # Extract a single integer ID (tolerates stray characters)
+    m = re.search(r"\d+", player_id or "")
+    if not m:
+        raise HTTPException(status_code=400, detail=f"Invalid player_id '{player_id}'. Must be an integer.")
+    pid = int(m.group(0))
+
+    s_date = _parse_date(start_date)
+    e_date = _parse_date(end_date)
+
+    ts = get_player_time_series(pid, s_date, e_date)  # your existing service fn (select includes turnovers, z_score)
+    if isinstance(ts, list) and limit:
+        ts = ts[:limit]
+
+    payload = {
+        "player_id": pid,
+        "start_date": s_date,
+        "end_date": e_date,
+        "series": ts,
+    }
+    return JSONResponse(
+        content=jsonable_encoder(sanitize_response(payload)),
+        headers={"Cache-Control": "public, max-age=600"},
+    )
