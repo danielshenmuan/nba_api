@@ -7,3 +7,4 @@ requests-cache==1.2.1
 requests
 google-cloud-bigquery
 db-dtypes
+rapidfuzz
