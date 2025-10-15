@@ -1,6 +1,7 @@
 # daily_ingest.py
 import os, time, numpy as np, pandas as pd
 from datetime import datetime, timedelta
+from pathlib import Path
 from google.cloud import bigquery
 from nba_api.stats.endpoints import LeagueGameLog, BoxScoreTraditionalV2
 from requests.exceptions import ReadTimeout
@@ -82,6 +83,15 @@ def run_ingestion(target_date=None, season="2024-25"):
     all_df["game_date"] = target_date.date()
     return all_df
 
+def refresh_league_pg_stats():
+    """Rebuilds nba_data.league_pg_stats_by_season after ingest (cheap, partition-pruned)."""
+    client = bigquery.Client(project="fantasy-survivor-app")
+    sql_path = Path(__file__).resolve().parents[1] / "infra" / "bq" / "sql" / "create_league_pg_stats_by_season.sql"
+    sql = sql_path.read_text()
+    job = client.query(sql, location="northamerica-northeast1")
+    job.result()
+    print("Refreshed league_pg_stats_by_season ✅")
+
 if __name__ == "__main__":
     target_date = datetime.today() - timedelta(days=1)
     df = run_ingestion(target_date)
@@ -97,3 +107,5 @@ if __name__ == "__main__":
         )
         job.result()
         print(f"Loaded {len(df)} rows into {table} for {target_date.date()}")
+
+        refresh_league_pg_stats()
