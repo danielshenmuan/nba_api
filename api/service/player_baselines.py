@@ -2,30 +2,18 @@ from google.cloud import bigquery
 
 PROJECT = "fantasy-survivor-app"
 LOC = "northamerica-northeast1"
-
 TABLE_DAILY = "fantasy-survivor-app.nba_data.player_daily_game_stats_p"
 TABLE_HIST  = "fantasy-survivor-app.nba_data.player_historical_game_stats_p"
 TABLE_PRE   = "fantasy-survivor-app.nba_data.league_pg_stats_by_season"
 
-SEASON_DATES = {
-    "2024-25": ("2024-10-01", "2025-06-30"),
-}
-
 def get_player_baselines_v1(player_id: int, season: str, window: int = 5):
-    """
-    Returns a dict with:
-      metadata, minutes_season, minutes_l5, usage_proxy(_l5),
-      per-cat structs (PTS, REB, AST, STL, BLK, 3PM, FG%, FT%, TO),
-      z_total_season/l5/delta
-    Uses precomputed league means/stds & usage quantiles from TABLE_PRE.
-    """
-    if season not in SEASON_DATES:
-        raise ValueError(f"Unsupported season '{season}'")
-    s_start, s_end = SEASON_DATES[season]
-
     client = bigquery.Client(project=PROJECT)
 
     sql = f"""
+    DECLARE season STRING DEFAULT @season;
+    DECLARE y1 INT64 DEFAULT CAST(SPLIT(season, '-')[OFFSET(0)] AS INT64);
+    DECLARE s_start DATE DEFAULT DATE(y1, 10, 1);
+    DECLARE s_end   DATE DEFAULT DATE(y1 + 1, 6, 30);
     DECLARE w INT64 DEFAULT @window;
 
     WITH pre AS (
@@ -39,7 +27,8 @@ def get_player_baselines_v1(player_id: int, season: str, window: int = 5):
       FROM `{TABLE_DAILY}` d
       LEFT JOIN `{TABLE_HIST}` h USING (player_id, game_date)
       WHERE d.player_id = @pid
-        AND d.game_date BETWEEN DATE(@s_start) AND DATE(@s_end)
+        AND d.season = @season          -- fast equality on cluster + prunes by date below
+        AND d.game_date BETWEEN s_start AND s_end
         AND d.minutes > 0
     ),
     per_player_pg AS (
@@ -71,32 +60,18 @@ def get_player_baselines_v1(player_id: int, season: str, window: int = 5):
         SAFE_DIVIDE(AVG(COALESCE(fga,0)) + AVG(COALESCE(fta,0)), NULLIF(AVG(minutes),0)) AS usage_per_min
       FROM lastN
     ),
-    -- Map usage per minute to season quantiles from precompute (0..100 integer)
     usage_percentiles AS (
       SELECT
-        CAST(
-          ARRAY_LENGTH(
-            (SELECT ARRAY(SELECT v FROM UNNEST(pre.usage_q101) v WHERE v IS NOT NULL AND v <= pg.usage_per_min))
-          ) - 1
-          AS INT64
-        ) AS usage_proxy,
-        CAST(
-          ARRAY_LENGTH(
-            (SELECT ARRAY(SELECT v FROM UNNEST(pre.usage_q101) v WHERE v IS NOT NULL AND v <= l5.usage_per_min))
-          ) - 1
-          AS INT64
-        ) AS usage_proxy_l5
+        CAST(ARRAY_LENGTH( (SELECT ARRAY(SELECT v FROM UNNEST(pre.usage_q101) v WHERE v IS NOT NULL AND v <= pg.usage_per_min)) ) - 1 AS INT64) AS usage_proxy,
+        CAST(ARRAY_LENGTH( (SELECT ARRAY(SELECT v FROM UNNEST(pre.usage_q101) v WHERE v IS NOT NULL AND v <= l5.usage_per_min)) ) - 1 AS INT64) AS usage_proxy_l5
       FROM per_player_pg pg, per_player_l5 l5, pre
     )
-
     SELECT
       pg.player_id, pg.player_name AS name, pg.team,
       pg.minutes AS minutes_season, l5.minutes AS minutes_l5,
-      -- usage (may be NULL if missing minutes/attempts)
       NULLIF(up.usage_proxy,   -1) AS usage_proxy,
       NULLIF(up.usage_proxy_l5,-1) AS usage_proxy_l5,
 
-      -- Per-category z's using precomputed means/stds (FG/FT use impact stds)
       STRUCT(pg.pts AS avg_season,
              SAFE_DIVIDE(pg.pts - pre.means.m_pts, NULLIF(pre.stds.s_pts,0)) AS z_season,
              l5.pts AS avg_l5,
@@ -133,7 +108,6 @@ def get_player_baselines_v1(player_id: int, season: str, window: int = 5):
              SAFE_DIVIDE(l5.fg3m - pre.means.m_fg3m, NULLIF(pre.stds.s_fg3m,0)) AS z_l5,
              (SAFE_DIVIDE(l5.fg3m - pre.means.m_fg3m, NULLIF(pre.stds.s_fg3m,0)) - SAFE_DIVIDE(pg.fg3m - pre.means.m_fg3m, NULLIF(pre.stds.s_fg3m,0))) AS z_delta) AS `3PM`,
 
-      -- FG% impact (weighted by FGA, using impact std)
       STRUCT(pg.fg_pct AS avg_season,
              SAFE_DIVIDE((pg.fg_pct - pre.means.m_fg_pct) * pg.fga, NULLIF(pre.stds.s_fg_imp,0)) AS z_season,
              l5.fg_pct AS avg_l5,
@@ -141,7 +115,6 @@ def get_player_baselines_v1(player_id: int, season: str, window: int = 5):
              (SAFE_DIVIDE((l5.fg_pct - pre.means.m_fg_pct) * l5.fga, NULLIF(pre.stds.s_fg_imp,0))
             -  SAFE_DIVIDE((pg.fg_pct - pre.means.m_fg_pct) * pg.fga, NULLIF(pre.stds.s_fg_imp,0))) AS z_delta) AS `FG%`,
 
-      -- FT% impact (weighted by FTA, using impact std)
       STRUCT(pg.ft_pct AS avg_season,
              SAFE_DIVIDE((pg.ft_pct - pre.means.m_ft_pct) * pg.fta, NULLIF(pre.stds.s_ft_imp,0)) AS z_season,
              l5.ft_pct AS avg_l5,
@@ -153,12 +126,7 @@ def get_player_baselines_v1(player_id: int, season: str, window: int = 5):
              SAFE_DIVIDE(pg.turnovers - pre.means.m_tov, NULLIF(pre.stds.s_tov,0)) AS z_season,
              l5.turnovers AS avg_l5,
              SAFE_DIVIDE(l5.turnovers - pre.means.m_tov, NULLIF(pre.stds.s_tov,0)) AS z_l5,
-             (SAFE_DIVIDE(l5.turnovers - pre.means.m_tov, NULLIF(pre.stds.s_tov,0)) - SAFE_DIVIDE(pg.turnovers - pre.means.m_tov, NULLIF(pre.stds.s_tov,0))) AS z_delta) AS TO
-
-    FROM per_player_pg pg
-    JOIN per_player_l5 l5 ON TRUE
-    JOIN pre ON TRUE
-    JOIN usage_percentiles up ON TRUE
+             (SAFE_DIVIDE(l5.turnovers - pre.means.m_tov, NULLIF(pre.stds.s_tov,0)) - SAFE_DIVIDE(pg.turnovers - pre.means.m_tov, NULLIF(pre.stds.s_tov,0))) AS z_delta) AS turnovers;
     """
 
     job = client.query(
@@ -167,8 +135,6 @@ def get_player_baselines_v1(player_id: int, season: str, window: int = 5):
             query_parameters=[
                 bigquery.ScalarQueryParameter("pid", "INT64", player_id),
                 bigquery.ScalarQueryParameter("season", "STRING", season),
-                bigquery.ScalarQueryParameter("s_start", "STRING", s_start),
-                bigquery.ScalarQueryParameter("s_end", "STRING", s_end),
                 bigquery.ScalarQueryParameter("window", "INT64", window),
             ]
         ),
@@ -179,7 +145,7 @@ def get_player_baselines_v1(player_id: int, season: str, window: int = 5):
         return None
     r = rows[0]
 
-    # Assemble totals (TO negative)
+    # totals
     def z(obj, k): return float(obj[k]) if obj[k] is not None else 0.0
     z_total_season = (
         z(r["PTS"], "z_season") + z(r["REB"], "z_season") + z(r["AST"], "z_season") +
@@ -196,7 +162,7 @@ def get_player_baselines_v1(player_id: int, season: str, window: int = 5):
         "player_id": r["player_id"],
         "name": r["name"],
         "team": r["team"],
-        "position": None,  # add later if you create a dim table
+        "position": None,
         "minutes_season": r["minutes_season"],
         "minutes_l5": r["minutes_l5"],
         "usage_proxy": r["usage_proxy"],
@@ -209,7 +175,7 @@ def get_player_baselines_v1(player_id: int, season: str, window: int = 5):
         "3PM": dict(r["3PM"]),
         "FG%": dict(r["FG%"]),
         "FT%": dict(r["FT%"]),
-        "TO":  dict(r["TO"]),
+        "turnovers":  dict(r["turnovers"]),
         "z_total_season": round(z_total_season, 3),
         "z_total_l5": round(z_total_l5, 3),
         "z_total_delta": round(z_total_l5 - z_total_season, 3),

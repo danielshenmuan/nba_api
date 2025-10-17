@@ -1,8 +1,15 @@
--- Creates/refreshes season-level league means/stds and usage quantiles
+-- Rebuilds league_pg_stats_by_season for the *current* season inferred from today.
 CREATE OR REPLACE TABLE `fantasy-survivor-app.nba_data.league_pg_stats_by_season` AS
-WITH seasons AS (
-  -- add rows for each season you want to support
-  SELECT "2024-25" AS season, DATE "2024-10-01" AS start_date, DATE "2025-06-30" AS end_date
+WITH cur AS (
+  SELECT
+    IF(EXTRACT(MONTH FROM CURRENT_DATE()) >= 10, EXTRACT(YEAR FROM CURRENT_DATE()), EXTRACT(YEAR FROM CURRENT_DATE()) - 1) AS y1
+),
+season_bounds AS (
+  SELECT
+    FORMAT('%d-%02d', y1, MOD(y1+1,100)) AS season,
+    DATE(y1, 10, 1) AS start_date,
+    DATE(y1+1, 6, 30) AS end_date
+  FROM cur
 ),
 season_games AS (
   SELECT
@@ -12,8 +19,8 @@ season_games AS (
   FROM `fantasy-survivor-app.nba_data.player_daily_game_stats_p` d
   LEFT JOIN `fantasy-survivor-app.nba_data.player_historical_game_stats_p` h
     USING (player_id, game_date)
-  JOIN seasons s
-    ON d.game_date BETWEEN s.start_date AND s.end_date
+  JOIN season_bounds sb
+    ON d.game_date BETWEEN sb.start_date AND sb.end_date
   WHERE d.minutes > 0
 ),
 per_player_pg AS (
@@ -34,12 +41,6 @@ league_means AS (
     AVG(fg_pct) AS m_fg_pct, AVG(ft_pct) AS m_ft_pct, AVG(turnovers) AS m_tov
   FROM per_player_pg
 ),
-impacts AS (
-  SELECT
-    (fg_pct - (SELECT m_fg_pct FROM league_means)) * fga AS fg_impact,
-    (ft_pct - (SELECT m_ft_pct FROM league_means)) * fta AS ft_impact
-  FROM per_player_pg
-),
 league_std AS (
   SELECT
     STDDEV_POP(pts)  AS s_pts,   STDDEV_POP(reb) AS s_reb, STDDEV_POP(ast) AS s_ast,
@@ -53,7 +54,7 @@ usage_quantiles AS (
   SELECT APPROX_QUANTILES(usage_per_min, 101) AS usage_q101 FROM per_player_pg
 )
 SELECT
-  (SELECT season FROM seasons) AS season,
+  (SELECT season FROM season_bounds) AS season,
   (SELECT AS STRUCT * FROM league_means) AS means,
   (SELECT AS STRUCT * FROM league_std)   AS stds,
   (SELECT usage_q101 FROM usage_quantiles) AS usage_q101;
