@@ -21,7 +21,7 @@ def get_player_baselines_v1(player_id: int, season: str, window: int = 5):
     ),
     season_games AS (
       SELECT
-        d.player_id, d.player_name, d.team_abbr, d.game_date, d.minutes,
+        d.player_id, d.player_name, d.game_date, d.min as minutes,
         d.pts, d.reb, d.ast, d.stl, d.blk, d.fg3m, d.fg_pct, d.ft_pct, d.turnovers,
         h.fg_attempts AS fga, h.ft_attempts AS fta
       FROM `{TABLE_DAILY}` d
@@ -29,13 +29,12 @@ def get_player_baselines_v1(player_id: int, season: str, window: int = 5):
       WHERE d.player_id = @pid
         AND d.season = @season          -- fast equality on cluster + prunes by date below
         AND d.game_date BETWEEN s_start AND s_end
-        AND d.minutes > 0
+        AND d.min > 0
     ),
     per_player_pg AS (
       SELECT
         ANY_VALUE(player_id) AS player_id,
         ANY_VALUE(player_name) AS player_name,
-        ANY_VALUE(team_abbr)   AS team,
         AVG(pts)  AS pts,  AVG(reb) AS reb, AVG(ast) AS ast, AVG(stl) AS stl, AVG(blk) AS blk,
         AVG(fg3m) AS fg3m, AVG(fg_pct) AS fg_pct, AVG(ft_pct) AS ft_pct, AVG(turnovers) AS turnovers,
         AVG(COALESCE(fga,0)) AS fga, AVG(COALESCE(fta,0)) AS fta,
@@ -67,7 +66,7 @@ def get_player_baselines_v1(player_id: int, season: str, window: int = 5):
       FROM per_player_pg pg, per_player_l5 l5, pre
     )
     SELECT
-      pg.player_id, pg.player_name AS name, pg.team,
+      pg.player_id, pg.player_name AS name,
       pg.minutes AS minutes_season, l5.minutes AS minutes_l5,
       NULLIF(up.usage_proxy,   -1) AS usage_proxy,
       NULLIF(up.usage_proxy_l5,-1) AS usage_proxy_l5,
@@ -126,7 +125,11 @@ def get_player_baselines_v1(player_id: int, season: str, window: int = 5):
              SAFE_DIVIDE(pg.turnovers - pre.means.m_tov, NULLIF(pre.stds.s_tov,0)) AS z_season,
              l5.turnovers AS avg_l5,
              SAFE_DIVIDE(l5.turnovers - pre.means.m_tov, NULLIF(pre.stds.s_tov,0)) AS z_l5,
-             (SAFE_DIVIDE(l5.turnovers - pre.means.m_tov, NULLIF(pre.stds.s_tov,0)) - SAFE_DIVIDE(pg.turnovers - pre.means.m_tov, NULLIF(pre.stds.s_tov,0))) AS z_delta) AS turnovers;
+             (SAFE_DIVIDE(l5.turnovers - pre.means.m_tov, NULLIF(pre.stds.s_tov,0)) - SAFE_DIVIDE(pg.turnovers - pre.means.m_tov, NULLIF(pre.stds.s_tov,0))) AS z_delta) AS turnovers
+        FROM per_player_pg AS pg
+        JOIN per_player_l5 AS l5 ON TRUE
+        JOIN pre              ON TRUE
+        JOIN usage_percentiles AS up ON TRUE;
     """
 
     job = client.query(
@@ -150,18 +153,17 @@ def get_player_baselines_v1(player_id: int, season: str, window: int = 5):
     z_total_season = (
         z(r["PTS"], "z_season") + z(r["REB"], "z_season") + z(r["AST"], "z_season") +
         z(r["STL"], "z_season") + z(r["BLK"], "z_season") + z(r["3PM"], "z_season") +
-        z(r["FG%"], "z_season") + z(r["FT%"], "z_season") - z(r["TO"], "z_season")
+        z(r["FG%"], "z_season") + z(r["FT%"], "z_season") - z(r["turnovers"], "z_season")
     )
     z_total_l5 = (
         z(r["PTS"], "z_l5") + z(r["REB"], "z_l5") + z(r["AST"], "z_l5") +
         z(r["STL"], "z_l5") + z(r["BLK"], "z_l5") + z(r["3PM"], "z_l5") +
-        z(r["FG%"], "z_l5") + z(r["FT%"], "z_l5") - z(r["TO"], "z_l5")
+        z(r["FG%"], "z_l5") + z(r["FT%"], "z_l5") - z(r["turnovers"], "z_l5")
     )
 
     return {
         "player_id": r["player_id"],
         "name": r["name"],
-        "team": r["team"],
         "position": None,
         "minutes_season": r["minutes_season"],
         "minutes_l5": r["minutes_l5"],
