@@ -21,6 +21,7 @@ from jobs.daily_ingest import compute_zscores
 
 # Set this to a YYYY-MM-DD string to force a specific date without passing --date.
 MANUAL_DATE: str | None = None
+MANUAL_DATE = '2025-10-21'
 DEFAULT_TIMEOUT = 30
 DEFAULT_RETRIES = 3
 
