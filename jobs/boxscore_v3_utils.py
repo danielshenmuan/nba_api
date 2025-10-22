@@ -2,15 +2,94 @@
 from __future__ import annotations
 
 import re
-from datetime import date
+import time
+from datetime import date, datetime
 from typing import Iterable
 
 import pandas as pd
+from nba_api.stats.endpoints import BoxScoreTraditionalV3
+from nba_api.stats.library.http import NBAStatsHTTP
+from requests.exceptions import RequestException
 
 # Pattern that captures ISO-8601 style minute strings such as ``PT33M12.00S``.
 _MINUTES_ISO_PATTERN = re.compile(
     r"PT(?:(?P<minutes>\d+)M)?(?:(?P<seconds>\d+(?:\.\d+)?)S)?"
 )
+
+DEFAULT_TIMEOUT = 30
+DEFAULT_RETRIES = 3
+
+
+def discover_game_ids(
+    target_date: datetime,
+    *,
+    retries: int = DEFAULT_RETRIES,
+    timeout: int = DEFAULT_TIMEOUT,
+) -> list[str]:
+    """Return game IDs for ``target_date`` using the ScoreboardV2 endpoint."""
+
+    params = {
+        "GameDate": target_date.strftime("%m/%d/%Y"),
+        "DayOffset": 0,
+        "LeagueID": "00",
+    }
+
+    for attempt in range(retries):
+        try:
+            response = NBAStatsHTTP().send_api_request(
+                endpoint="scoreboardv2",
+                parameters=params,
+                timeout=timeout,
+            )
+            data = response.get_normalized_dict()
+            headers = data.get("GameHeader", []) if data else []
+            return sorted(
+                {str(row["GAME_ID"]) for row in headers if row.get("GAME_ID")}
+            )
+        except Exception as exc:  # noqa: BLE001 - stats SDK raises generic exceptions
+            if isinstance(exc, KeyboardInterrupt):
+                raise
+            if attempt == retries - 1:
+                raise RequestException(
+                    f"Failed to load ScoreboardV2 data: {exc}"
+                ) from exc
+            time.sleep(1)
+
+    return []
+
+
+def load_traditional_boxscore(
+    game_id: str,
+    *,
+    retries: int = DEFAULT_RETRIES,
+    timeout: int = DEFAULT_TIMEOUT,
+) -> pd.DataFrame:
+    """Fetch ``BoxScoreTraditionalV3`` data for ``game_id`` as a DataFrame."""
+
+    for attempt in range(retries):
+        try:
+            box = BoxScoreTraditionalV3(game_id=game_id, timeout=timeout)
+            try:
+                frames = box.get_data_frames()
+            except AttributeError as attr_err:
+                # When the stats API returns an empty body the SDK calls ``.keys()``
+                # on ``None``. Treat that scenario the same as "no data yet".
+                if "'NoneType' object has no attribute 'keys'" in str(attr_err):
+                    return pd.DataFrame()
+                raise
+            if not frames:
+                return pd.DataFrame()
+            return frames[0].copy()
+        except Exception as exc:  # noqa: BLE001 - stats SDK raises generic exceptions
+            if isinstance(exc, KeyboardInterrupt):
+                raise
+            if attempt == retries - 1:
+                raise RequestException(
+                    f"Failed to load BoxScoreTraditionalV3 for {game_id}: {exc}"
+                ) from exc
+            time.sleep(1)
+
+    return pd.DataFrame()
 
 
 def _normalize_minutes(value) -> str | None:
@@ -52,6 +131,37 @@ def _normalize_minutes(value) -> str | None:
     return f"{minutes:d}:00"
 
 
+def minutes_to_float(value) -> float | None:
+    """Convert an ``MM:SS`` style value into decimal minutes."""
+
+    if value is None or pd.isna(value):
+        return None
+
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return None
+        if ":" not in s:
+            s = _normalize_minutes(s) or ""
+        if ":" in s:
+            mins, secs = s.split(":", 1)
+            try:
+                minutes = int(float(mins))
+                seconds = float(secs)
+            except ValueError:
+                return None
+            return minutes + seconds / 60.0
+        try:
+            return float(s)
+        except ValueError:
+            return None
+
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 _COLUMN_SOURCE_MAP: dict[str, str] = {
     "fieldGoalsMade": "FGM",
     "fieldGoalsAttempted": "FGA",
@@ -68,6 +178,9 @@ _COLUMN_SOURCE_MAP: dict[str, str] = {
     "blocks": "BLK",
     "turnovers": "TO",
     "points": "PTS",
+    "reboundsOffensive": "OREB",
+    "reboundsDefensive": "DREB",
+    "foulsPersonal": "PF",
 }
 
 
@@ -86,11 +199,14 @@ _EXPECTED_COLUMNS: Iterable[str] = (
     "FTM",
     "FTA",
     "FT_PCT",
+    "OREB",
+    "DREB",
     "REB",
     "AST",
     "STL",
     "BLK",
     "TO",
+    "PF",
     "PTS",
     "GAME_DATE",
 )
@@ -162,3 +278,13 @@ def map_traditional_boxscore(
             df[column] = pd.NA
 
     return df.loc[:, list(_EXPECTED_COLUMNS)].reset_index(drop=True)
+
+
+__all__ = [
+    "DEFAULT_RETRIES",
+    "DEFAULT_TIMEOUT",
+    "discover_game_ids",
+    "load_traditional_boxscore",
+    "map_traditional_boxscore",
+    "minutes_to_float",
+]

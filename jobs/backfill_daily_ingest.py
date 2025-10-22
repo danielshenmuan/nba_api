@@ -10,21 +10,25 @@ from typing import Iterable
 
 import pandas as pd
 from google.cloud import bigquery
-from nba_api.stats.endpoints import BoxScoreTraditionalV3
-from nba_api.stats.library.http import NBAStatsHTTP
 from requests.exceptions import RequestException
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from jobs.boxscore_v3_utils import map_traditional_boxscore
-from jobs.daily_ingest import compute_zscores, refresh_league_pg_stats
+from jobs.boxscore_v3_utils import (
+    DEFAULT_RETRIES as BOX_DEFAULT_RETRIES,
+    DEFAULT_TIMEOUT as BOX_DEFAULT_TIMEOUT,
+    discover_game_ids,
+    load_traditional_boxscore,
+    map_traditional_boxscore,
+)
+from jobs.daily_ingest import build_bq_payload, compute_zscores, refresh_league_pg_stats
 
 DEFAULT_PROJECT = "fantasy-survivor-app"
 DEFAULT_TABLE = "fantasy-survivor-app.nba_data.player_daily_game_stats_p"
-DEFAULT_TIMEOUT = 30
-DEFAULT_RETRIES = 3
+DEFAULT_TIMEOUT = BOX_DEFAULT_TIMEOUT
+DEFAULT_RETRIES = BOX_DEFAULT_RETRIES
 
 
 def _season_from_date(day: datetime) -> str:
@@ -32,67 +36,6 @@ def _season_from_date(day: datetime) -> str:
     if day.month >= 10:
         return f"{year}-{(year + 1) % 100:02d}"
     return f"{year - 1}-{year % 100:02d}"
-
-
-def _discover_game_ids(
-    target_date: datetime,
-    *,
-    retries: int = DEFAULT_RETRIES,
-    timeout: int = DEFAULT_TIMEOUT,
-) -> list[str]:
-    params = {
-        "GameDate": target_date.strftime("%m/%d/%Y"),
-        "DayOffset": 0,
-        "LeagueID": "00",
-    }
-
-    for attempt in range(retries):
-        try:
-            response = NBAStatsHTTP().send_api_request(
-                endpoint="scoreboardv2",
-                parameters=params,
-                timeout=timeout,
-            )
-            data = response.get_normalized_dict()
-            headers = data.get("GameHeader", []) if data else []
-            ids = [str(row["GAME_ID"]) for row in headers if row.get("GAME_ID")]
-            return sorted(set(ids))
-        except Exception as exc:  # noqa: BLE001 - stats API raises generic exceptions
-            if isinstance(exc, KeyboardInterrupt):
-                raise
-            if attempt == retries - 1:
-                raise RequestException(
-                    f"Failed to load ScoreboardV2 data: {exc}"
-                ) from exc
-            time.sleep(1)
-
-    return []
-
-
-def _load_boxscore(
-    game_id: str,
-    *,
-    retries: int = DEFAULT_RETRIES,
-    timeout: int = DEFAULT_TIMEOUT,
-) -> pd.DataFrame:
-    for attempt in range(retries):
-        try:
-            box = BoxScoreTraditionalV3(game_id=game_id, timeout=timeout)
-            frames = box.get_data_frames()
-            if not frames:
-                return pd.DataFrame()
-            return frames[0].copy()
-        except Exception as exc:  # noqa: BLE001 - SDK raises generic exceptions
-            if isinstance(exc, KeyboardInterrupt):
-                raise
-            if attempt == retries - 1:
-                raise RequestException(
-                    f"Failed to load BoxScoreTraditionalV3 for {game_id}: {exc}"
-                ) from exc
-            time.sleep(1)
-
-    return pd.DataFrame()
-
 
 def _build_bq_frame(
     game_ids: Iterable[str],
@@ -106,7 +49,7 @@ def _build_bq_frame(
 
     for game_id in game_ids:
         try:
-            raw = _load_boxscore(game_id, retries=retries, timeout=timeout)
+            raw = load_traditional_boxscore(game_id, retries=retries, timeout=timeout)
         except RequestException as exc:
             print(f"Skipping {game_id}: {exc}")
             continue
@@ -128,37 +71,7 @@ def _build_bq_frame(
 
     combined = pd.concat(frames, ignore_index=True)
     combined = compute_zscores(combined)
-    combined["season"] = season_value
-
-    combined["PLAYER_ID"] = pd.to_numeric(combined["PLAYER_ID"], errors="coerce")
-    combined["GAME_ID_INT"] = pd.to_numeric(combined["GAME_ID"], errors="coerce")
-    
-    combined = combined[combined["PLAYER_ID"].notna()]
-    combined = combined[combined["GAME_ID_INT"].notna()]
-
-    out = pd.DataFrame(
-        {
-            "game_date": pd.to_datetime(combined["GAME_DATE"]).dt.date,
-            "game_id": combined["GAME_ID_INT"].astype("Int64"),
-            "player_id": combined["PLAYER_ID"].astype("Int64"),
-            "player_name": combined["PLAYER_NAME"].astype(str),
-            "minutes": combined["MIN_INT"].astype(float),
-            "pts": combined["PTS"].astype(float),
-            "reb": combined["REB"].astype(float),
-            "ast": combined["AST"].astype(float),
-            "stl": combined["STL"].astype(float),
-            "blk": combined["BLK"].astype(float),
-            "fg3m": combined["FG3M"].astype(float),
-            "fg_pct": combined["FG_PCT"].astype(float),
-            "ft_pct": combined["FT_PCT"].astype(float),
-            "turnovers": combined["TO"].astype(float),
-            "z_score": combined["Z_SCORE"].astype(float),
-            "season": combined["season"].astype(str),
-        }
-    )
-
-    out = out[out["minutes"].notna() & (out["minutes"] > 0)].reset_index(drop=True)
-    return out
+    return build_bq_payload(combined, season_value)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -237,7 +150,9 @@ def main() -> int:
         game_ids = [str(gid) for gid in args.game_ids]
     else:
         try:
-            game_ids = _discover_game_ids(target_date)
+            game_ids = discover_game_ids(
+                target_date, retries=DEFAULT_RETRIES, timeout=DEFAULT_TIMEOUT
+            )
         except RequestException as exc:
             print(f"Failed to discover games for {target_date.date()}: {exc}")
             return 0

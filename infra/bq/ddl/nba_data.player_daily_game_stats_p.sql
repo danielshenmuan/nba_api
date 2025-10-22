@@ -1,7 +1,9 @@
 CREATE TABLE IF NOT EXISTS `fantasy-survivor-app.nba_data.player_daily_game_stats_p` (
+  game_date DATE,
   game_id INT64,
   player_id INT64,
   player_name STRING,
+  min FLOAT64,
   fgm INT64,
   fga INT64,
   fg_pct FLOAT64,
@@ -21,8 +23,6 @@ CREATE TABLE IF NOT EXISTS `fantasy-survivor-app.nba_data.player_daily_game_stat
   dreb INT64,
   oreb INT64,
   z_score FLOAT64,
-  minutes FLOAT64,
-  game_date DATE,
   season STRING
 )
 PARTITION BY DATE(game_date)
