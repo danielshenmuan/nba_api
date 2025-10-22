@@ -9,7 +9,8 @@ import time
 from typing import Iterable
 
 import pandas as pd
-from nba_api.stats.endpoints import BoxScoreTraditionalV3, ScoreboardV2
+from nba_api.stats.endpoints import BoxScoreTraditionalV3
+from nba_api.stats.library.http import NBAStatsHTTP
 from requests.exceptions import RequestException
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -20,6 +21,7 @@ from jobs.daily_ingest import compute_zscores
 
 # Set this to a YYYY-MM-DD string to force a specific date without passing --date.
 MANUAL_DATE: str | None = None
+MANUAL_DATE = '2025-10-21'
 DEFAULT_TIMEOUT = 30
 DEFAULT_RETRIES = 3
 
@@ -37,21 +39,25 @@ def _fetch_game_ids(
     retries: int = DEFAULT_RETRIES,
     timeout: int = DEFAULT_TIMEOUT,
 ) -> list[str]:
-    game_date_str = target_date.strftime("%m/%d/%Y")
+    """Return game IDs for the date using the ScoreboardV2 endpoint."""
+
+    params = {
+        "GameDate": target_date.strftime("%m/%d/%Y"),
+        "DayOffset": 0,
+        "LeagueID": "00",
+    }
 
     for attempt in range(retries):
         try:
-            board = ScoreboardV2(
-                game_date=game_date_str,
-                league_id="00",
-                day_offset="0",
+            response = NBAStatsHTTP().send_api_request(
+                endpoint="scoreboardv2",
+                parameters=params,
                 timeout=timeout,
             )
-            frames = board.get_data_frames()
-            header = frames[0] if frames else pd.DataFrame()
-            if header.empty:
-                return []
-            return header["GAME_ID"].dropna().astype(str).unique().tolist()
+            data = response.get_normalized_dict()
+            headers = data.get("GameHeader", []) if data else []
+            ids = [str(row["GAME_ID"]) for row in headers if row.get("GAME_ID")]
+            return sorted(set(ids))
         except Exception as exc:  # noqa: BLE001 - stats API raises generic exceptions
             if isinstance(exc, KeyboardInterrupt):
                 raise
@@ -71,7 +77,15 @@ def _fetch_boxscore(
     for attempt in range(retries):
         try:
             box = BoxScoreTraditionalV3(game_id=game_id, timeout=timeout)
-            frames = box.get_data_frames()
+            try:
+                frames = box.get_data_frames()
+            except AttributeError as attr_err:
+                # The stats API occasionally responds with an empty payload, causing the
+                # SDK to call ``.keys()`` on ``None`` while building DataFrames. Treat
+                # that as "no data yet" instead of bubbling an opaque exception.
+                if "'NoneType' object has no attribute 'keys'" in str(attr_err):
+                    return pd.DataFrame()
+                raise
             if not frames:
                 return pd.DataFrame()
             return frames[0].copy()
@@ -103,11 +117,46 @@ def _build_bq_frame(
             continue
 
         if raw_df.empty:
+            print(f"Skipping {game_id}: box score payload not available yet.")
             continue
 
         cleaned = raw_df.copy()
+
+
+        required_columns = {
+            "PLAYER_ID",
+            "PLAYER_NAME",
+            "TEAM_ABBREVIATION",
+            "MIN",
+            "PTS",
+            "REB",
+            "AST",
+            "STL",
+            "BLK",
+            "FG3M",
+            "FG3A",
+            "FGM",
+            "FGA",
+            "FG_PCT",
+            "FG3_PCT",
+            "FTM",
+            "FTA",
+            "FT_PCT",
+            "TO",
+        }
+        missing = [col for col in required_columns if col not in cleaned.columns]
+        if missing:
+            missing_str = ", ".join(sorted(missing))
+            print(
+                "Skipping "
+                f"{game_id}: box score payload missing required columns: {missing_str}."
+            )
+            continue
+
         if "TEAM_ABBREVIATION" in cleaned.columns:
-            cleaned = cleaned[cleaned["TEAM_ABBREVIATION"].str.upper() != "TOT"]
+            cleaned = cleaned[
+                cleaned["TEAM_ABBREVIATION"].astype(str).str.upper() != "TOT"
+            ]
         cleaned = cleaned[cleaned["PLAYER_ID"].notna()]
         if cleaned.empty:
             continue
@@ -130,8 +179,7 @@ def _build_bq_frame(
             "TO",
         ]
         for col in numeric_cols:
-            if col in cleaned.columns:
-                cleaned[col] = pd.to_numeric(cleaned[col], errors="coerce")
+            cleaned[col] = pd.to_numeric(cleaned[col], errors="coerce")
 
         cleaned["GAME_ID"] = str(game_id)
         cleaned["GAME_DATE"] = pd.to_datetime(target_date.date())
@@ -195,6 +243,11 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--game-ids",
+        nargs="*",
+        help="Optional explicit GAME_ID values to inspect (skips ScoreboardV2 lookup).",
+    )
+    parser.add_argument(
         "--season",
         default=None,
         help="Optional season override (e.g. 2024-25).",
@@ -209,11 +262,14 @@ def main() -> None:
         f"{target_date.date()}..."
     )
 
-    try:
-        game_ids = _fetch_game_ids(target_date)
-    except RequestException as exc:
-        print(f"Failed to discover games for {target_date.date()}: {exc}")
-        return
+    if args.game_ids:
+        game_ids = [str(gid) for gid in args.game_ids]
+    else:
+        try:
+            game_ids = _fetch_game_ids(target_date)
+        except RequestException as exc:
+            print(f"Failed to discover games for {target_date.date()}: {exc}")
+            return
 
     if not game_ids:
         print(f"No games found on {target_date.date()}.")
