@@ -10,7 +10,8 @@ from typing import Iterable
 
 import pandas as pd
 from google.cloud import bigquery
-from nba_api.stats.endpoints import BoxScoreTraditionalV3, ScoreboardV2
+from nba_api.stats.endpoints import BoxScoreTraditionalV3
+from nba_api.stats.library.http import NBAStatsHTTP
 from requests.exceptions import RequestException
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -74,16 +75,23 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _fetch_game_ids(target_date: datetime, retries: int = 3, timeout: int = 30) -> list[str]:
-    game_date_str = target_date.strftime("%m/%d/%Y")
+    params = {
+        "GameDate": target_date.strftime("%m/%d/%Y"),
+        "DayOffset": 0,
+        "LeagueID": "00",
+    }
 
     for attempt in range(retries):
         try:
-            board = ScoreboardV2(game_date=game_date_str, league_id="00", day_offset="0", timeout=timeout)
-            header = board.get_data_frames()[0]
-            if header.empty:
-                return []
-            ids = header["GAME_ID"].dropna().astype(str).unique().tolist()
-            return ids
+            response = NBAStatsHTTP().send_api_request(
+                endpoint="scoreboardv2",
+                parameters=params,
+                timeout=timeout,
+            )
+            data = response.get_normalized_dict()
+            headers = data.get("GameHeader", []) if data else []
+            ids = [str(row["GAME_ID"]) for row in headers if row.get("GAME_ID")]
+            return sorted(set(ids))
         except Exception as exc:  # noqa: BLE001
             if isinstance(exc, KeyboardInterrupt):
                 raise

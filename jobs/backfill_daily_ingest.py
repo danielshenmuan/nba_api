@@ -10,7 +10,8 @@ from typing import Iterable
 
 import pandas as pd
 from google.cloud import bigquery
-from nba_api.stats.endpoints import BoxScoreTraditionalV3, ScoreboardV2
+from nba_api.stats.endpoints import BoxScoreTraditionalV3
+from nba_api.stats.library.http import NBAStatsHTTP
 from requests.exceptions import RequestException
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -39,20 +40,24 @@ def _discover_game_ids(
     retries: int = DEFAULT_RETRIES,
     timeout: int = DEFAULT_TIMEOUT,
 ) -> list[str]:
+    params = {
+        "GameDate": target_date.strftime("%m/%d/%Y"),
+        "DayOffset": 0,
+        "LeagueID": "00",
+    }
+
     for attempt in range(retries):
         try:
-            board = ScoreboardV2(
-                game_date=target_date.strftime("%m/%d/%Y"),
-                day_offset=0,
-                league_id="00",
+            response = NBAStatsHTTP().send_api_request(
+                endpoint="scoreboardv2",
+                parameters=params,
                 timeout=timeout,
             )
-            frames = board.get_data_frames()
-            if not frames:
-                return []
-            header = frames[0]
-            return [str(val) for val in header["GAME_ID"].dropna().unique()]
-        except Exception as exc:  # noqa: BLE001 - SDK raises generic exceptions
+            data = response.get_normalized_dict()
+            headers = data.get("GameHeader", []) if data else []
+            ids = [str(row["GAME_ID"]) for row in headers if row.get("GAME_ID")]
+            return sorted(set(ids))
+        except Exception as exc:  # noqa: BLE001 - stats API raises generic exceptions
             if isinstance(exc, KeyboardInterrupt):
                 raise
             if attempt == retries - 1:
