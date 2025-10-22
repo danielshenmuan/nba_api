@@ -23,5 +23,6 @@ CREATE TABLE `fantasy-survivor-app.nba_data.player_daily_game_stats`
   pf INT64,
   dreb INT64,
   oreb INT64,
-  z_score FLOAT64
+  z_score FLOAT64,
+  season STRING
 );
