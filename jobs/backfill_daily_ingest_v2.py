@@ -17,6 +17,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from jobs.boxscore_v3_utils import map_traditional_boxscore
 from jobs.daily_ingest import compute_zscores, refresh_league_pg_stats
 
 DEFAULT_PROJECT = "fantasy-survivor-app"
@@ -125,37 +126,12 @@ def _build_ingestion_frame(game_ids: Iterable[str], game_date: date) -> pd.DataF
         if box_df.empty:
             continue
 
-        # Filter out team total rows and ensure player identifiers exist
-        cleaned = box_df.copy()
-        cleaned = cleaned[~cleaned["PLAYER_NAME"].str.contains("totals", case=False, na=False)]
-        cleaned = cleaned[cleaned["PLAYER_ID"].notna()]
-        if cleaned.empty:
+        mapped = map_traditional_boxscore(box_df, game_id, game_date)
+        if mapped.empty:
+            print(f"Skipping {game_id}: box score missing required player data.")
             continue
 
-        cleaned["GAME_ID"] = str(game_id)
-        cleaned["GAME_DATE"] = pd.to_datetime(game_date)
-
-        numeric_cols = [
-            "PTS",
-            "REB",
-            "AST",
-            "STL",
-            "BLK",
-            "FG3M",
-            "FG3A",
-            "FGM",
-            "FGA",
-            "FG_PCT",
-            "FTM",
-            "FTA",
-            "FT_PCT",
-            "TO",
-        ]
-        for col in numeric_cols:
-            if col in cleaned.columns:
-                cleaned[col] = pd.to_numeric(cleaned[col], errors="coerce")
-
-        frames.append(cleaned)
+        frames.append(mapped)
         time.sleep(0.3)
 
     if not frames:

@@ -17,6 +17,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from jobs.boxscore_v3_utils import map_traditional_boxscore
 from jobs.daily_ingest import compute_zscores, refresh_league_pg_stats
 
 DEFAULT_PROJECT = "fantasy-survivor-app"
@@ -109,42 +110,12 @@ def _build_bq_frame(
             print(f"Skipping {game_id}: box score not available.")
             continue
 
-        if "TEAM_ABBREVIATION" in raw.columns:
-            raw = raw[raw["TEAM_ABBREVIATION"].astype(str).str.upper() != "TOT"]
-
-        if raw.empty:
+        mapped = map_traditional_boxscore(raw, game_id, target_date.date())
+        if mapped.empty:
+            print(f"Skipping {game_id}: box score missing required player data.")
             continue
 
-        required_columns = {
-            "PLAYER_ID",
-            "PLAYER_NAME",
-            "TEAM_ABBREVIATION",
-            "MIN",
-            "PTS",
-            "REB",
-            "AST",
-            "STL",
-            "BLK",
-            "FG3M",
-            "FGM",
-            "FGA",
-            "FG_PCT",
-            "FT_PCT",
-            "FTA",
-            "FTM",
-            "TO",
-        }
-        missing = [col for col in required_columns if col not in raw.columns]
-        if missing:
-            print(
-                f"Skipping {game_id}: missing required columns {', '.join(sorted(missing))}."
-            )
-            continue
-
-        raw = raw.copy()
-        raw["GAME_ID"] = str(game_id)
-        raw["GAME_DATE"] = target_date.date()
-        frames.append(raw)
+        frames.append(mapped)
         time.sleep(0.25)
 
     if not frames:

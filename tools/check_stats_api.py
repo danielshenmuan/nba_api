@@ -17,6 +17,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from jobs.boxscore_v3_utils import map_traditional_boxscore
 from jobs.daily_ingest import compute_zscores
 
 # Set this to a YYYY-MM-DD string to force a specific date without passing --date.
@@ -120,69 +121,12 @@ def _build_bq_frame(
             print(f"Skipping {game_id}: box score payload not available yet.")
             continue
 
-        cleaned = raw_df.copy()
-
-        required_columns = {
-            "PLAYER_ID",
-            "PLAYER_NAME",
-            "TEAM_ABBREVIATION",
-            "MIN",
-            "PTS",
-            "REB",
-            "AST",
-            "STL",
-            "BLK",
-            "FG3M",
-            "FG3A",
-            "FGM",
-            "FGA",
-            "FG_PCT",
-            "FG3_PCT",
-            "FTM",
-            "FTA",
-            "FT_PCT",
-            "TO",
-        }
-        missing = [col for col in required_columns if col not in cleaned.columns]
-        if missing:
-            missing_str = ", ".join(sorted(missing))
-            print(
-                "Skipping "
-                f"{game_id}: box score payload missing required columns: {missing_str}."
-            )
+        mapped = map_traditional_boxscore(raw_df, game_id, target_date.date())
+        if mapped.empty:
+            print(f"Skipping {game_id}: box score missing required player data.")
             continue
 
-        if "TEAM_ABBREVIATION" in cleaned.columns:
-            cleaned = cleaned[
-                cleaned["TEAM_ABBREVIATION"].astype(str).str.upper() != "TOT"
-            ]
-        cleaned = cleaned[cleaned["PLAYER_ID"].notna()]
-        if cleaned.empty:
-            continue
-
-        numeric_cols = [
-            "PTS",
-            "REB",
-            "AST",
-            "STL",
-            "BLK",
-            "FG3M",
-            "FG3A",
-            "FGM",
-            "FGA",
-            "FG_PCT",
-            "FG3_PCT",
-            "FTM",
-            "FTA",
-            "FT_PCT",
-            "TO",
-        ]
-        for col in numeric_cols:
-            cleaned[col] = pd.to_numeric(cleaned[col], errors="coerce")
-
-        cleaned["GAME_ID"] = str(game_id)
-        cleaned["GAME_DATE"] = pd.to_datetime(target_date.date())
-        frames.append(cleaned)
+        frames.append(mapped)
         time.sleep(0.3)
 
     if not frames:
