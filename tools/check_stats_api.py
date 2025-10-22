@@ -1,30 +1,184 @@
-"""Fetch sample rows shaped like ``player_daily_game_stats_p`` for a date."""
+"""Materialize player_daily_game_stats_p-shaped rows via BoxScoreTraditionalV3."""
 from __future__ import annotations
 
 from argparse import ArgumentParser
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 import sys
+import time
+from typing import Iterable
 
 import pandas as pd
+from nba_api.stats.endpoints import BoxScoreTraditionalV3, ScoreboardV2
+from requests.exceptions import RequestException
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from jobs.daily_ingest import run_ingestion
+from jobs.daily_ingest import compute_zscores
 
-# Set this to a YYYY-MM-DD string to force a specific date without
-# providing the ``--date`` flag (e.g., MANUAL_DATE = "2021-01-15").
-# Leave as ``None`` to default to today's games unless ``--date`` is passed.
+# Set this to a YYYY-MM-DD string to force a specific date without passing --date.
 MANUAL_DATE: str | None = None
-MANUAL_DATE = "2025-10-22"
+DEFAULT_TIMEOUT = 30
+DEFAULT_RETRIES = 3
+
+
+def _season_from_date(day: date) -> str:
+    year = day.year
+    if day.month >= 10:
+        return f"{year}-{(year + 1) % 100:02d}"
+    return f"{year - 1}-{year % 100:02d}"
+
+
+def _fetch_game_ids(
+    target_date: datetime,
+    *,
+    retries: int = DEFAULT_RETRIES,
+    timeout: int = DEFAULT_TIMEOUT,
+) -> list[str]:
+    game_date_str = target_date.strftime("%m/%d/%Y")
+
+    for attempt in range(retries):
+        try:
+            board = ScoreboardV2(
+                game_date=game_date_str,
+                league_id="00",
+                day_offset="0",
+                timeout=timeout,
+            )
+            frames = board.get_data_frames()
+            header = frames[0] if frames else pd.DataFrame()
+            if header.empty:
+                return []
+            return header["GAME_ID"].dropna().astype(str).unique().tolist()
+        except Exception as exc:  # noqa: BLE001 - stats API raises generic exceptions
+            if isinstance(exc, KeyboardInterrupt):
+                raise
+            if attempt == retries - 1:
+                raise RequestException(f"Failed to load ScoreboardV2 data: {exc}") from exc
+            time.sleep(1)
+
+    return []
+
+
+def _fetch_boxscore(
+    game_id: str,
+    *,
+    retries: int = DEFAULT_RETRIES,
+    timeout: int = DEFAULT_TIMEOUT,
+) -> pd.DataFrame:
+    for attempt in range(retries):
+        try:
+            box = BoxScoreTraditionalV3(game_id=game_id, timeout=timeout)
+            frames = box.get_data_frames()
+            if not frames:
+                return pd.DataFrame()
+            return frames[0].copy()
+        except Exception as exc:  # noqa: BLE001 - stats API raises generic exceptions
+            if isinstance(exc, KeyboardInterrupt):
+                raise
+            if attempt == retries - 1:
+                raise RequestException(f"Failed to load box score for {game_id}: {exc}") from exc
+            time.sleep(1)
+
+    return pd.DataFrame()
+
+
+def _build_bq_frame(
+    game_ids: Iterable[str],
+    target_date: datetime,
+    season_value: str,
+    *,
+    retries: int = DEFAULT_RETRIES,
+    timeout: int = DEFAULT_TIMEOUT,
+) -> pd.DataFrame:
+    frames: list[pd.DataFrame] = []
+
+    for game_id in game_ids:
+        try:
+            raw_df = _fetch_boxscore(game_id, retries=retries, timeout=timeout)
+        except RequestException as exc:
+            print(f"Skipping {game_id}: {exc}")
+            continue
+
+        if raw_df.empty:
+            continue
+
+        cleaned = raw_df.copy()
+        if "TEAM_ABBREVIATION" in cleaned.columns:
+            cleaned = cleaned[cleaned["TEAM_ABBREVIATION"].str.upper() != "TOT"]
+        cleaned = cleaned[cleaned["PLAYER_ID"].notna()]
+        if cleaned.empty:
+            continue
+
+        numeric_cols = [
+            "PTS",
+            "REB",
+            "AST",
+            "STL",
+            "BLK",
+            "FG3M",
+            "FG3A",
+            "FGM",
+            "FGA",
+            "FG_PCT",
+            "FG3_PCT",
+            "FTM",
+            "FTA",
+            "FT_PCT",
+            "TO",
+        ]
+        for col in numeric_cols:
+            if col in cleaned.columns:
+                cleaned[col] = pd.to_numeric(cleaned[col], errors="coerce")
+
+        cleaned["GAME_ID"] = str(game_id)
+        cleaned["GAME_DATE"] = pd.to_datetime(target_date.date())
+        frames.append(cleaned)
+        time.sleep(0.3)
+
+    if not frames:
+        return pd.DataFrame()
+
+    combined = pd.concat(frames, ignore_index=True)
+    combined = compute_zscores(combined)
+
+    combined["PLAYER_ID"] = pd.to_numeric(combined["PLAYER_ID"], errors="coerce")
+    combined = combined[combined["PLAYER_ID"].notna()]
+
+    combined["game_date"] = pd.to_datetime(target_date.date())
+    combined["season"] = season_value
+
+    out = pd.DataFrame({
+        "game_date": combined["game_date"],
+        "game_id": combined["GAME_ID"].astype(str),
+        "player_id": combined["PLAYER_ID"].astype("Int64"),
+        "player_name": combined["PLAYER_NAME"].astype(str),
+        "team_abbr": combined["TEAM_ABBREVIATION"].astype(str),
+        "minutes": combined["MIN_INT"].astype(float),
+        "pts": combined["PTS"].astype(float),
+        "reb": combined["REB"].astype(float),
+        "ast": combined["AST"].astype(float),
+        "stl": combined["STL"].astype(float),
+        "blk": combined["BLK"].astype(float),
+        "fg3m": combined["FG3M"].astype(float),
+        "fg_pct": combined["FG_PCT"].astype(float),
+        "ft_pct": combined["FT_PCT"].astype(float),
+        "turnovers": combined["TO"].astype(float),
+        "z_score": combined["Z_SCORE"].astype(float),
+        "season": combined["season"].astype(str),
+    })
+
+    out = out[out["minutes"].notna() & (out["minutes"] > 0)].reset_index(drop=True)
+    return out
+
 
 def main() -> None:
     parser = ArgumentParser(
         description=(
-            "Check NBA live stats availability by materializing the rows that would "
-            "be loaded into player_daily_game_stats_p."
+            "Check stats.nba.com availability by shaping BoxScoreTraditionalV3 data into "
+            "player_daily_game_stats_p rows."
         )
     )
     parser.add_argument(
@@ -36,24 +190,43 @@ def main() -> None:
             else datetime.today()
         ),
         help=(
-            "Target game date in YYYY-MM-DD format (defaults to MANUAL_DATE if set "
-            "or today otherwise)."
+            "Target game date in YYYY-MM-DD format (defaults to MANUAL_DATE if set or "
+            "today otherwise)."
         ),
+    )
+    parser.add_argument(
+        "--season",
+        default=None,
+        help="Optional season override (e.g. 2024-25).",
     )
     args = parser.parse_args()
 
     target_date = args.date
-    print(f"Fetching live data for {target_date.date()}...")
+    season_value = args.season or _season_from_date(target_date.date())
 
-    df = run_ingestion(target_date)
-    if df.empty:
-        print("No rows returned – confirm there were games and the live API is publishing stats.")
+    print(
+        "Fetching ScoreboardV2 game IDs and BoxScoreTraditionalV3 player stats for "
+        f"{target_date.date()}..."
+    )
+
+    try:
+        game_ids = _fetch_game_ids(target_date)
+    except RequestException as exc:
+        print(f"Failed to discover games for {target_date.date()}: {exc}")
         return
 
-    print(f"Returned {len(df)} rows shaped like player_daily_game_stats_p.")
+    if not game_ids:
+        print(f"No games found on {target_date.date()}.")
+        return
 
+    frame = _build_bq_frame(game_ids, target_date, season_value)
+    if frame.empty:
+        print("No rows returned – confirm box scores are published for that date.")
+        return
+
+    print(f"Returned {len(frame)} rows shaped like player_daily_game_stats_p.")
     with pd.option_context("display.max_rows", None, "display.max_columns", None):
-        print(df)
+        print(frame)
 
 
 if __name__ == "__main__":
