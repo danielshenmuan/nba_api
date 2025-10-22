@@ -266,10 +266,12 @@ def run_ingestion(target_date: datetime | None = None, season: str | None = None
         all_df["season"] = all_df["game_date"].apply(_season_from_date)
 
     all_df["PLAYER_ID"] = pd.to_numeric(all_df["PLAYER_ID"], errors="coerce")
+    all_df["GAME_ID_INT"] = pd.to_numeric(all_df["GAME_ID"], errors="coerce")
+    all_df = all_df[all_df["GAME_ID_INT"].notna()]
 
     out = pd.DataFrame({
         "game_date": all_df["game_date"],
-        "game_id": all_df["GAME_ID"].astype(str),
+        "game_id": all_df["GAME_ID_INT"].astype("Int64"),
         "player_id": all_df["PLAYER_ID"].astype("Int64"),
         "player_name": all_df["PLAYER_NAME"].astype(str),
         "team_abbr": all_df["TEAM_ABBREVIATION"].astype(str),

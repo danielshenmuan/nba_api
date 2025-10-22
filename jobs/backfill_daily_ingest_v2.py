@@ -184,9 +184,12 @@ def main() -> int:
     player_frame["game_date"] = pd.to_datetime(target_date.date())
     player_frame["season"] = season_value
 
+    player_frame["GAME_ID_INT"] = pd.to_numeric(player_frame["GAME_ID"], errors="coerce")
+    player_frame = player_frame[player_frame["GAME_ID_INT"].notna()]
+
     out = pd.DataFrame({
         "game_date": player_frame["game_date"],
-        "game_id": player_frame["GAME_ID"].astype(str),
+        "game_id": player_frame["GAME_ID_INT"].astype("Int64"),
         "player_id": player_frame["PLAYER_ID"].astype("Int64"),
         "player_name": player_frame["PLAYER_NAME"].astype(str),
         "team_abbr": player_frame["TEAM_ABBREVIATION"].astype(str),

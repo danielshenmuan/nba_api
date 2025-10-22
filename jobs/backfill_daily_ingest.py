@@ -131,11 +131,15 @@ def _build_bq_frame(
     combined["season"] = season_value
 
     combined["PLAYER_ID"] = pd.to_numeric(combined["PLAYER_ID"], errors="coerce")
+    combined["GAME_ID_INT"] = pd.to_numeric(combined["GAME_ID"], errors="coerce")
+    
+    combined = combined[combined["PLAYER_ID"].notna()]
+    combined = combined[combined["GAME_ID_INT"].notna()]
 
     out = pd.DataFrame(
         {
             "game_date": pd.to_datetime(combined["GAME_DATE"]).dt.date,
-            "game_id": combined["GAME_ID"].astype(str),
+            "game_id": combined["GAME_ID_INT"].astype("Int64"),
             "player_id": combined["PLAYER_ID"].astype("Int64"),
             "player_name": combined["PLAYER_NAME"].astype(str),
             "team_abbr": combined["TEAM_ABBREVIATION"].astype(str),
