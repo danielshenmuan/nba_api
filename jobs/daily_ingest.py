@@ -274,7 +274,6 @@ def run_ingestion(target_date: datetime | None = None, season: str | None = None
         "game_id": all_df["GAME_ID_INT"].astype("Int64"),
         "player_id": all_df["PLAYER_ID"].astype("Int64"),
         "player_name": all_df["PLAYER_NAME"].astype(str),
-        "team_abbr": all_df["TEAM_ABBREVIATION"].astype(str),
         "minutes": all_df["MIN_INT"].astype(float),
         "pts": all_df["PTS"].astype(float),
         "reb": all_df["REB"].astype(float),

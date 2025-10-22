@@ -192,7 +192,6 @@ def main() -> int:
         "game_id": player_frame["GAME_ID_INT"].astype("Int64"),
         "player_id": player_frame["PLAYER_ID"].astype("Int64"),
         "player_name": player_frame["PLAYER_NAME"].astype(str),
-        "team_abbr": player_frame["TEAM_ABBREVIATION"].astype(str),
         "minutes": player_frame["MIN_INT"].astype(float),
         "pts": player_frame["PTS"].astype(float),
         "reb": player_frame["REB"].astype(float),

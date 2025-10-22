@@ -148,7 +148,6 @@ def _build_bq_frame(
         "game_id": combined["GAME_ID_INT"].astype("Int64"),
         "player_id": combined["PLAYER_ID"].astype("Int64"),
         "player_name": combined["PLAYER_NAME"].astype(str),
-        "team_abbr": combined["TEAM_ABBREVIATION"].astype(str),
         "minutes": combined["MIN_INT"].astype(float),
         "pts": combined["PTS"].astype(float),
         "reb": combined["REB"].astype(float),
