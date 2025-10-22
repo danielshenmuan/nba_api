@@ -2,6 +2,7 @@
 import re
 import time
 from datetime import datetime, timedelta
+from json import JSONDecodeError
 from pathlib import Path
 
 import numpy as np
@@ -72,6 +73,16 @@ def fetch_boxscore(game_id: str, timeout: int = 15, retries: int = 3) -> dict:
         except Exception as exc:  # noqa: BLE001 - ensure JSON/value errors trigger retries
             if isinstance(exc, KeyboardInterrupt):
                 raise
+
+            # The box score feed can return an empty body (JSON decode error) when a game
+            # has not started or stats are still publishing. Treat that as "no data yet"
+            # after the final retry instead of aborting the entire ingestion run.
+            if isinstance(exc, JSONDecodeError):
+                if attempt == retries - 1:
+                    print(f"Live box score not yet available for {game_id}; skipping.")
+                    return {}
+                time.sleep(1)
+                continue
 
             if attempt == retries - 1:
                 raise RequestException(

@@ -18,6 +18,7 @@ from jobs.daily_ingest import run_ingestion
 # providing the ``--date`` flag (e.g., MANUAL_DATE = "2021-01-15").
 # Leave as ``None`` to default to today's games unless ``--date`` is passed.
 MANUAL_DATE: str | None = None
+MANUAL_DATE = "2025-10-22"
 
 def main() -> None:
     parser = ArgumentParser(
