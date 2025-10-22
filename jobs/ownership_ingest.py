@@ -34,22 +34,31 @@ if ROOT_ENV.exists():
         pass  # ignore if python-dotenv not installed in the image
 
 # Required in any environment (Cloud Run: provided via --set-env-vars)
-REQ = ["YAHOO_CONSUMER_KEY","YAHOO_CONSUMER_SECRET",
-       "YAHOO_ACCESS_TOKEN","YAHOO_ACCESS_TOKEN_SECRET","YAHOO_LEAGUE_ID"]
+REQ = [
+    "YAHOO_CONSUMER_KEY",
+    "YAHOO_CONSUMER_SECRET",
+    "YAHOO_ACCESS_TOKEN",
+    "YAHOO_REFRESH_TOKEN",
+    # optional but nice to have:
+    # "YAHOO_TOKEN_TYPE", "YAHOO_TOKEN_EXPIRES_AT"
+]
 missing = [k for k in REQ if not os.getenv(k)]
 if missing:
     raise SystemExit(f"Missing required env vars: {missing}")
 
-# Writable token file for YFPY in Cloud Run
 TMP_ENV = Path("/tmp/yahoo_tokens.env")
-TMP_ENV.write_text("\n".join([
+lines = [
     f"YAHOO_CONSUMER_KEY={os.environ['YAHOO_CONSUMER_KEY']}",
     f"YAHOO_CONSUMER_SECRET={os.environ['YAHOO_CONSUMER_SECRET']}",
     f"YAHOO_ACCESS_TOKEN={os.environ['YAHOO_ACCESS_TOKEN']}",
-    f"YAHOO_ACCESS_TOKEN_SECRET={os.environ['YAHOO_ACCESS_TOKEN_SECRET']}",
+    f"YAHOO_REFRESH_TOKEN={os.environ['YAHOO_REFRESH_TOKEN']}",
     f"YAHOO_LEAGUE_ID={os.environ['YAHOO_LEAGUE_ID']}",
     f"YAHOO_GAME_ID={os.getenv('YAHOO_GAME_ID','')}",
-]))
+]
+# optional extras if you have them
+if os.getenv("YAHOO_TOKEN_TYPE"):      lines.append(f"YAHOO_TOKEN_TYPE={os.environ['YAHOO_TOKEN_TYPE']}")
+# if os.getenv("YAHOO_TOKEN_EXPIRES_AT"): lines.append(f"YAHOO_TOKEN_EXPIRES_AT={os.environ['YAHOO_TOKEN_EXPIRES_AT']}")
+TMP_ENV.write_text("\n".join(lines))
 
 # ---------- Helpers ----------
 def _bq() -> bigquery.Client:
@@ -197,7 +206,6 @@ def run(snapshot: date | None = None) -> pd.DataFrame:
     return merged
 
 print("[AUTH] project:", google.auth.default()[1])
-print("[BQ  ] client.project:", client.project, "client.location:", client.location)
 
 if __name__ == "__main__":
     run()

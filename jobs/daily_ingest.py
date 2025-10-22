@@ -24,17 +24,26 @@ def _season_from_date(d: datetime.date) -> str:
     y = d.year
     return f"{y}-{(y+1)%100:02d}" if d.month >= 10 else f"{y-1}-{y%100:02d}"
 
-def get_game_ids_for_date(target_date: datetime, season: str = "2024-25") -> list[str]:
-    log = LeagueGameLog(
-        season=season,
-        season_type_all_star="Regular Season",
-        player_or_team_abbreviation="T",  # team logs -> one row per game
-        date_from_nullable=mmddyyyy(target_date),
-        date_to_nullable=mmddyyyy(target_date),
-        timeout=15,
-    )
-    df = log.get_data_frames()[0]
-    return df["GAME_ID"].drop_duplicates().astype(str).tolist()
+def get_game_ids_for_date(target_date: datetime, season: str | None = None) -> list[str]:
+    season_to_query = season or _season_from_date(target_date.date())
+    game_ids: set[str] = set()
+
+    # The stats API segments schedules by season type. Try the common buckets so
+    # we can cover regular season, play-in, and playoff slates.
+    for season_type in ("Regular Season", "Playoffs", "PlayIn"):
+        log = LeagueGameLog(
+            season=season_to_query,
+            season_type_all_star=season_type,
+            player_or_team_abbreviation="T",  # team logs -> one row per game
+            date_from_nullable=mmddyyyy(target_date),
+            date_to_nullable=mmddyyyy(target_date),
+            timeout=15,
+        )
+        df = log.get_data_frames()[0]
+        if not df.empty:
+            game_ids.update(df["GAME_ID"].drop_duplicates().astype(str))
+
+    return sorted(game_ids)
 
 def fetch_boxscore(game_id: str, retries: int = 3, timeout: int = 15) -> pd.DataFrame:
     for attempt in range(retries):
@@ -78,11 +87,12 @@ def compute_zscores(box: pd.DataFrame) -> pd.DataFrame:
     box["Z_SCORE"] = z_list
     return box
 
-def run_ingestion(target_date: datetime | None = None, season: str = "2024-25") -> pd.DataFrame:
+def run_ingestion(target_date: datetime | None = None, season: str | None = None) -> pd.DataFrame:
     if target_date is None:
         target_date = datetime.today() - timedelta(days=1)
 
-    game_ids = get_game_ids_for_date(target_date, season=season)
+    season_to_query = season or _season_from_date(target_date.date())
+    game_ids = get_game_ids_for_date(target_date, season=season_to_query)
     if not game_ids:
         print(f"No games on {target_date.date()}")
         return pd.DataFrame()
@@ -122,7 +132,7 @@ def run_ingestion(target_date: datetime | None = None, season: str = "2024-25") 
         "player_id": all_df["PLAYER_ID"].astype("Int64"),
         "player_name": all_df["PLAYER_NAME"].astype(str),
         "team_abbr": all_df["TEAM_ABBREVIATION"].astype(str),
-        "minutes": all_df["MIN_INT"].astype("Int64"),
+        "minutes": all_df["MIN_INT"].astype(float),
         "pts": all_df["PTS"].astype(float),
         "reb": all_df["REB"].astype(float),
         "ast": all_df["AST"].astype(float),
@@ -133,6 +143,7 @@ def run_ingestion(target_date: datetime | None = None, season: str = "2024-25") 
         "ft_pct": all_df["FT_PCT"].astype(float),
         "turnovers": all_df["TO"].astype(float),
         "z_score": all_df["Z_SCORE"].astype(float),
+        "season": all_df["season"].astype(str),
     })
 
     # Drop DNP rows (no minutes parsed)
