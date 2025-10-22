@@ -35,18 +35,25 @@ def _scoreboard_endpoint_for_date(target_date: datetime) -> str:
 
 
 def load_games(target_date: datetime, timeout: int = 15, retries: int = 3) -> list[dict]:
-    board = live_scoreboard.ScoreBoard(get_request=False, timeout=timeout)
-    board.endpoint_url = _scoreboard_endpoint_for_date(target_date)
+    endpoint_url = _scoreboard_endpoint_for_date(target_date)
 
     for attempt in range(retries):
         try:
+            board = live_scoreboard.ScoreBoard(get_request=False, timeout=timeout)
+            board.endpoint_url = endpoint_url
             board.get_request()
             data = board.get_dict()
             games = data.get("scoreboard", {}).get("games", [])
             return games or []
-        except RequestException:
-            if attempt == retries - 1:
+        except Exception as exc:  # noqa: BLE001 - we need to catch json decode/value errors too
+            if isinstance(exc, KeyboardInterrupt):
                 raise
+
+            # The NBA live CDN will sometimes return a transient 403/empty body
+            # when a new scoreboard file is rolling out. Treat JSON parse
+            # failures the same as transport errors and retry.
+            if attempt == retries - 1:
+                raise RequestException(f"Failed to load scoreboard JSON: {exc}") from exc
             time.sleep(1)
 
     return []
@@ -55,11 +62,21 @@ def load_games(target_date: datetime, timeout: int = 15, retries: int = 3) -> li
 def fetch_boxscore(game_id: str, timeout: int = 15, retries: int = 3) -> dict:
     for attempt in range(retries):
         try:
-            box = live_boxscore.BoxScore(game_id=game_id, timeout=timeout)
+            box = live_boxscore.BoxScore(
+                game_id=game_id,
+                timeout=timeout,
+                get_request=False,
+            )
+            box.get_request()
             return box.get_dict().get("game", {})
-        except RequestException:
-            if attempt == retries - 1:
+        except Exception as exc:  # noqa: BLE001 - ensure JSON/value errors trigger retries
+            if isinstance(exc, KeyboardInterrupt):
                 raise
+
+            if attempt == retries - 1:
+                raise RequestException(
+                    f"Failed to load box score JSON for {game_id}: {exc}"
+                ) from exc
             time.sleep(1)
 
     return {}
