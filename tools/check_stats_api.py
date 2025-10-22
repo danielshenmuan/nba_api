@@ -122,7 +122,6 @@ def _build_bq_frame(
 
         cleaned = raw_df.copy()
 
-
         required_columns = {
             "PLAYER_ID",
             "PLAYER_NAME",
@@ -271,9 +270,9 @@ def main() -> None:
             print(f"Failed to discover games for {target_date.date()}: {exc}")
             return
 
-    if not game_ids:
-        print(f"No games found on {target_date.date()}.")
-        return
+        if not game_ids:
+            print(f"No games found on {target_date.date()}.")
+            return
 
     frame = _build_bq_frame(game_ids, target_date, season_value)
     if frame.empty:
