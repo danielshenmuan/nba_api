@@ -3,3 +3,7 @@ numpy
 google-cloud-bigquery
 db-dtypes
 nba_api
+python-dotenv
+yfpy==17.0.0
+python-dotenv>=1.0.1
+pyarrow
