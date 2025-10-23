@@ -189,7 +189,7 @@ _EXPECTED_COLUMNS: Iterable[str] = (
     "PLAYER_ID",
     "PLAYER_NAME",
     "TEAM_ABBREVIATION",
-    "MIN",
+    "MINUTES",
     "FGM",
     "FGA",
     "FG_PCT",
@@ -259,9 +259,9 @@ def map_traditional_boxscore(
 
     minutes_series = df.get("minutes")
     if minutes_series is not None:
-        df["MIN"] = minutes_series.apply(_normalize_minutes)
+        df["MINUTES"] = minutes_series.apply(_normalize_minutes)
     else:
-        df["MIN"] = None
+        df["MINUTES"] = None
 
     for source, target in _COLUMN_SOURCE_MAP.items():
         series = df.get(source)

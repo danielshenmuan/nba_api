@@ -9,7 +9,7 @@
     { "name": "game_date", "type": "DATE", "mode": "NULLABLE", "description": "" },
     { "name": "player_id", "type": "INTEGER", "mode": "NULLABLE", "description": "" },
     { "name": "player_name", "type": "STRING", "mode": "NULLABLE", "description": "" },
-    { "name": "min", "type": "FLOAT", "mode": "NULLABLE", "description": "" },
+    { "name": "minutes", "type": "FLOAT", "mode": "NULLABLE", "description": "" },
     { "name": "fgm", "type": "INTEGER", "mode": "NULLABLE", "description": "" },
     { "name": "fga", "type": "INTEGER", "mode": "NULLABLE", "description": "" },
     { "name": "fg_pct", "type": "FLOAT", "mode": "NULLABLE", "description": "" },

@@ -48,7 +48,7 @@ def compute_zscores(box: pd.DataFrame) -> pd.DataFrame:
             return int(value)
         return None
 
-    box["MIN_INT"] = box["MIN"].apply(_min_to_int)
+    box["MINUTES_INT"] = box["MINUTES"].apply(_min_to_int)
 
     stat_columns = [
         "PLAYER_NAME",
@@ -121,7 +121,7 @@ def build_bq_payload(frame: pd.DataFrame, season_value: str | None = None) -> pd
     df = frame.copy()
     df["PLAYER_ID"] = pd.to_numeric(df["PLAYER_ID"], errors="coerce")
     df["GAME_ID_INT"] = pd.to_numeric(df["GAME_ID"], errors="coerce")
-    df["MINUTES_FLOAT"] = df["MIN"].apply(minutes_to_float)
+    df["MINUTES_FLOAT"] = df["MINUTES"].apply(minutes_to_float)
     df["GAME_DATE"] = pd.to_datetime(df["GAME_DATE"]).dt.date
 
     if season_value is not None:
@@ -165,7 +165,7 @@ def build_bq_payload(frame: pd.DataFrame, season_value: str | None = None) -> pd
         "game_id": df["GAME_ID_INT"].astype("Int64"),
         "player_id": df["PLAYER_ID"].astype("Int64"),
         "player_name": df["PLAYER_NAME"].astype(str),
-        "min": df["MINUTES_FLOAT"].astype(float),
+        "minutes": df["MINUTES_FLOAT"].astype(float),
     }
 
     for dest, src in int_map.items():
@@ -183,7 +183,7 @@ def build_bq_payload(frame: pd.DataFrame, season_value: str | None = None) -> pd
         "game_id",
         "player_id",
         "player_name",
-        "min",
+        "minutes",
         "fgm",
         "fga",
         "fg_pct",

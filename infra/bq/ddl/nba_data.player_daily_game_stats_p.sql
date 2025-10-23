@@ -3,7 +3,7 @@ CREATE TABLE IF NOT EXISTS `fantasy-survivor-app.nba_data.player_daily_game_stat
   game_id INT64,
   player_id INT64,
   player_name STRING,
-  min FLOAT64,
+  minutes FLOAT64,
   fgm INT64,
   fga INT64,
   fg_pct FLOAT64,

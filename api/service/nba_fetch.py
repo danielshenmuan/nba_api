@@ -21,7 +21,7 @@ def get_daily_leaders(date, limit=10, mode="best"):
     client = get_client()
 
     order = "DESC" if mode == "best" else "ASC"
-    min_filter = "AND MIN >= 20" if mode == "worst" else ""
+    min_filter = "AND minutes >= 20" if mode == "worst" else ""
 
     query = f"""
     SELECT 
@@ -29,7 +29,7 @@ def get_daily_leaders(date, limit=10, mode="best"):
       player_name,
       game_id,
       game_date,
-      min,
+      minutes,
       pts, reb, ast, stl, blk, fg3m, fg_pct, ft_pct, turnovers,
       z_score
     FROM `{PROJECT_ID}.{DATASET}.{TABLE}`
