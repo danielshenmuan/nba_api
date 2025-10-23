@@ -12,17 +12,27 @@ from google.cloud import bigquery
 from requests.exceptions import RequestException
 
 CURRENT_DIR = Path(__file__).resolve().parent
-if str(CURRENT_DIR) not in sys.path:
-    sys.path.insert(0, str(CURRENT_DIR))
 
-from boxscore_v3_utils import (  # type: ignore
-    DEFAULT_RETRIES,
-    DEFAULT_TIMEOUT,
-    discover_game_ids,
-    load_traditional_boxscore,
-    map_traditional_boxscore,
-    minutes_to_float,
-)
+try:  # pragma: no cover - import fallback for Cloud Run images
+    from jobs.boxscore_v3_utils import (  # type: ignore
+        DEFAULT_RETRIES,
+        DEFAULT_TIMEOUT,
+        discover_game_ids,
+        load_traditional_boxscore,
+        map_traditional_boxscore,
+        minutes_to_float,
+    )
+except ModuleNotFoundError:  # pragma: no cover - local script execution
+    if str(CURRENT_DIR) not in sys.path:
+        sys.path.insert(0, str(CURRENT_DIR))
+    from boxscore_v3_utils import (  # type: ignore
+        DEFAULT_RETRIES,
+        DEFAULT_TIMEOUT,
+        discover_game_ids,
+        load_traditional_boxscore,
+        map_traditional_boxscore,
+        minutes_to_float,
+    )
 
 # ----------------------------
 # Baseline stats (update each season if needed)

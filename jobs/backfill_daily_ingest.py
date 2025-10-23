@@ -13,22 +13,37 @@ from google.cloud import bigquery
 from requests.exceptions import RequestException
 
 CURRENT_DIR = Path(__file__).resolve().parent
-if str(CURRENT_DIR) not in sys.path:
-    sys.path.insert(0, str(CURRENT_DIR))
 
-from boxscore_v3_utils import (  # type: ignore
-    DEFAULT_RETRIES as BOX_DEFAULT_RETRIES,
-    DEFAULT_TIMEOUT as BOX_DEFAULT_TIMEOUT,
-    discover_game_ids,
-    load_traditional_boxscore,
-    map_traditional_boxscore,
-)
-from daily_ingest import (  # type: ignore
-    build_bq_payload,
-    compute_zscores,
-    load_into_bigquery_tables,
-    refresh_league_pg_stats,
-)
+try:  # pragma: no cover - support packaged and flat layouts
+    from jobs.boxscore_v3_utils import (  # type: ignore
+        DEFAULT_RETRIES as BOX_DEFAULT_RETRIES,
+        DEFAULT_TIMEOUT as BOX_DEFAULT_TIMEOUT,
+        discover_game_ids,
+        load_traditional_boxscore,
+        map_traditional_boxscore,
+    )
+    from jobs.daily_ingest import (  # type: ignore
+        build_bq_payload,
+        compute_zscores,
+        load_into_bigquery_tables,
+        refresh_league_pg_stats,
+    )
+except ModuleNotFoundError:  # pragma: no cover - local execution fallback
+    if str(CURRENT_DIR) not in sys.path:
+        sys.path.insert(0, str(CURRENT_DIR))
+    from boxscore_v3_utils import (  # type: ignore
+        DEFAULT_RETRIES as BOX_DEFAULT_RETRIES,
+        DEFAULT_TIMEOUT as BOX_DEFAULT_TIMEOUT,
+        discover_game_ids,
+        load_traditional_boxscore,
+        map_traditional_boxscore,
+    )
+    from daily_ingest import (  # type: ignore
+        build_bq_payload,
+        compute_zscores,
+        load_into_bigquery_tables,
+        refresh_league_pg_stats,
+    )
 
 DEFAULT_PROJECT = "fantasy-survivor-app"
 DEFAULT_TABLE = "fantasy-survivor-app.nba_data.player_daily_game_stats_p"
