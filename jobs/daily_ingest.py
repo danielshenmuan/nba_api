@@ -294,7 +294,31 @@ def load_into_bigquery_tables(
     bq_client = client or bigquery.Client(project=project_id)
     load_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
 
-    job = bq_client.load_table_from_dataframe(df, partitioned_table, job_config=load_config)
+    def _align_to_schema(
+        frame: pd.DataFrame, table_ref: str
+    ) -> pd.DataFrame:
+        table_obj = bq_client.get_table(table_ref)
+        schema_columns = [field.name for field in table_obj.schema]
+
+        aligned = frame.copy()
+        extra_cols = [col for col in aligned.columns if col not in schema_columns]
+        if extra_cols:
+            print(
+                "Dropping columns not present in"
+                f" {table_obj.full_table_id}: {sorted(extra_cols)}"
+            )
+            aligned = aligned.drop(columns=extra_cols)
+
+        for column in schema_columns:
+            if column not in aligned.columns:
+                aligned[column] = None
+
+        return aligned[schema_columns]
+
+    partition_frame = _align_to_schema(df, partitioned_table)
+    job = bq_client.load_table_from_dataframe(
+        partition_frame, partitioned_table, job_config=load_config
+    )
     job.result()
     print(f"Loaded {len(df)} rows into {partitioned_table}.")
 
@@ -318,7 +342,10 @@ def load_into_bigquery_tables(
             )
             delete_job.result()
 
-    mirror_job = bq_client.load_table_from_dataframe(df, mirror_table, job_config=load_config)
+    mirror_frame = _align_to_schema(df, mirror_table)
+    mirror_job = bq_client.load_table_from_dataframe(
+        mirror_frame, mirror_table, job_config=load_config
+    )
     mirror_job.result()
     print(f"Loaded {len(df)} rows into {mirror_table}.")
 
