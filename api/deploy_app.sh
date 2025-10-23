@@ -9,7 +9,7 @@
 #   IMAGE_REPO       (default: us-central1-docker.pkg.dev/$PROJECT_ID/nba-api)
 #   PROJECT_ID       (default: fantasy-survivor-app)
 #   REGION           (default: us-central1)
-#   SERVICE_NAME     (default: nba-api)
+#   SERVICE_NAME     (default: nba-gbq-api)
 #   IMAGE_TAG        (default: timestamp)
 #   PLATFORM         (default: managed)
 #   SERVICE_ACCOUNT  (if set, used during deployment)
@@ -19,7 +19,7 @@ set -euo pipefail
 
 PROJECT_ID=${PROJECT_ID:-fantasy-survivor-app}
 REGION=${REGION:-us-central1}
-SERVICE_NAME=${SERVICE_NAME:-nba-api}
+SERVICE_NAME=${SERVICE_NAME:-nba-gbq-api}
 IMAGE_TAG=${IMAGE_TAG:-$(date +%Y%m%d%H%M%S)}
 PLATFORM=${PLATFORM:-managed}
 
