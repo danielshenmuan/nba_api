@@ -27,6 +27,40 @@ if [[ -z "${IMAGE_REPO:-}" ]]; then
   IMAGE_REPO="us-central1-docker.pkg.dev/${PROJECT_ID}/nba-api"
 fi
 
+ensure_repo_exists() {
+  local image_repo="$1"
+
+  local host_part="${image_repo%%/*}"
+  local remainder="${image_repo#${host_part}/}"
+  local repo_project="${remainder%%/*}"
+  local repo_name="${remainder#${repo_project}/}"
+
+  if [[ -z "${repo_name}" || "${repo_name}" == "${remainder}" ]]; then
+    echo "Unable to determine repository name from IMAGE_REPO=${image_repo}" >&2
+    exit 1
+  fi
+
+  local location="${host_part%%-docker.pkg.dev}"
+
+  if [[ -z "${repo_project}" || -z "${location}" ]]; then
+    echo "Unable to parse IMAGE_REPO=${image_repo}." >&2
+    exit 1
+  fi
+
+  if ! gcloud artifacts repositories describe "${repo_name}" \
+    --project "${repo_project}" \
+    --location "${location}" >/dev/null 2>&1; then
+    echo "Creating Artifact Registry repository ${repo_name} in ${location}..."
+    gcloud artifacts repositories create "${repo_name}" \
+      --project "${repo_project}" \
+      --location "${location}" \
+      --repository-format=docker \
+      --description "Created by deploy_app.sh"
+  fi
+}
+
+ensure_repo_exists "${IMAGE_REPO}"
+
 IMAGE_URI="${IMAGE_REPO}/nba-api:${IMAGE_TAG}"
 
 echo "Building container image ${IMAGE_URI}..."
