@@ -215,7 +215,7 @@ def main() -> int:
     )
 
     if not args.skip_refresh:
-        refresh_league_pg_stats()
+        refresh_league_pg_stats(client=client, project_id=args.project)
 
     return 0
 

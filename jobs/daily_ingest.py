@@ -4,13 +4,14 @@ from __future__ import annotations
 import importlib
 import sys
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 from google.cloud import bigquery
 from requests.exceptions import RequestException
+from google.api_core.exceptions import NotFound
 
 CURRENT_DIR = Path(__file__).resolve().parent
 
@@ -47,6 +48,9 @@ WEIGHTED_STD = [7.23, 2.51, 2.09, 0.38, 0.45, 0.95, 0.082, 0.124, 0.85]
 DEFAULT_PROJECT_ID = "fantasy-survivor-app"
 PARTITIONED_TABLE = "fantasy-survivor-app.nba_data.player_daily_game_stats_p"
 MIRROR_TABLE = "fantasy-survivor-app.nba_data.player_daily_game_stats"
+LEAGUE_STATS_TABLE = "fantasy-survivor-app.nba_data.league_pg_stats_by_season"
+LEAGUE_SQL_FILENAME = "create_league_pg_stats_by_season.sql"
+BQ_LOCATION = "northamerica-northeast1"
 
 
 def _season_from_date(d: date) -> str:
@@ -101,6 +105,23 @@ def compute_zscores(box: pd.DataFrame) -> pd.DataFrame:
     return box
 
 
+def _locate_sql_file(filename: str) -> Path:
+    """Locate a SQL file bundled with the job or in the repo tree."""
+
+    search_paths: list[Path] = [CURRENT_DIR / "sql" / filename, CURRENT_DIR / filename]
+
+    for parent in CURRENT_DIR.parents:
+        search_paths.append(parent / "infra" / "bq" / "sql" / filename)
+
+    for candidate in search_paths:
+        if candidate.exists():
+            return candidate
+
+    raise FileNotFoundError(
+        f"Unable to locate {filename}. Ensure it is packaged with the deployment image."
+    )
+
+
 def _collect_boxscores(
     game_ids: list[str],
     target_date: datetime,
@@ -129,7 +150,9 @@ def _collect_boxscores(
         frames.append(mapped)
         time.sleep(0.3)
 
-    if not frames:
+    combined = _collect_boxscores(game_ids, target_date, retries=retries, timeout=timeout)
+    if combined.empty:
+        print("No player stats returned; nothing to load.")
         return pd.DataFrame()
 
     return pd.concat(frames, ignore_index=True)
@@ -255,6 +278,38 @@ def build_bq_payload(frame: pd.DataFrame, season_value: str | None = None) -> pd
     return out.reset_index(drop=True)
 
 
+def _rows_exist_for_date(
+    table_ref: str, day: date, *, client: bigquery.Client
+) -> bool:
+    query = f"SELECT COUNT(1) AS row_count FROM `{table_ref}` WHERE game_date = @target"
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[bigquery.ScalarQueryParameter("target", "DATE", day)]
+    )
+    job = client.query(query, job_config=job_config, location=BQ_LOCATION)
+    result = list(job.result())
+    if not result:
+        return False
+    return result[0].get("row_count", 0) > 0
+
+
+def _league_stats_refreshed_today(client: bigquery.Client) -> bool:
+    try:
+        table = client.get_table(LEAGUE_STATS_TABLE)
+    except NotFound:
+        return False
+
+    modified = getattr(table, "modified", None)
+    if modified is None:
+        return False
+
+    if modified.tzinfo is None:
+        modified = modified.replace(tzinfo=timezone.utc)
+    else:
+        modified = modified.astimezone(timezone.utc)
+
+    return modified.date() >= datetime.now(timezone.utc).date()
+
+
 def run_ingestion(
     target_date: datetime | None = None,
     season: str | None = None,
@@ -287,10 +342,12 @@ def run_ingestion(
     return payload
 
 
-def refresh_league_pg_stats() -> None:
-    client = bigquery.Client(project="fantasy-survivor-app")
-    sql_path = Path(__file__).resolve().parents[1] / "infra" / "bq" / "sql" / "create_league_pg_stats_by_season.sql"
-    job = client.query(sql_path.read_text(), location="northamerica-northeast1")
+def refresh_league_pg_stats(
+    *, client: bigquery.Client | None = None, project_id: str = DEFAULT_PROJECT_ID
+) -> None:
+    bq_client = client or bigquery.Client(project=project_id)
+    sql_path = _locate_sql_file(LEAGUE_SQL_FILENAME)
+    job = bq_client.query(sql_path.read_text(), location=BQ_LOCATION)
     job.result()
     print("Refreshed league_pg_stats_by_season ✅")
 
@@ -387,15 +444,51 @@ def load_into_bigquery_tables(
 
 if __name__ == "__main__":
     target_date = datetime.today() - timedelta(days=1)
-    df = run_ingestion(target_date)
+    client = bigquery.Client(project=DEFAULT_PROJECT_ID)
+    partition_date = target_date.date()
 
-    if df.empty:
-        print("No rows to load.")
-    else:
-        load_into_bigquery_tables(
-            df,
-            project_id=DEFAULT_PROJECT_ID,
-            partitioned_table=PARTITIONED_TABLE,
-            mirror_table=MIRROR_TABLE,
+    try:
+        rows_exist = _rows_exist_for_date(
+            PARTITIONED_TABLE, partition_date, client=client
         )
-        refresh_league_pg_stats()
+    except Exception as exc:  # pragma: no cover - defensive logging
+        print(
+            "Unable to determine if rows already exist for",
+            f"{partition_date}: {exc}. Proceeding with ingestion.",
+        )
+        rows_exist = False
+
+    df = pd.DataFrame()
+
+    if rows_exist:
+        print(
+            f"{PARTITIONED_TABLE} already has rows for {partition_date}; "
+            "skipping ingestion."
+        )
+    else:
+        df = run_ingestion(target_date)
+
+        if df.empty:
+            print("No rows to load.")
+        else:
+            load_into_bigquery_tables(
+                df,
+                client=client,
+                project_id=DEFAULT_PROJECT_ID,
+                partitioned_table=PARTITIONED_TABLE,
+                mirror_table=MIRROR_TABLE,
+            )
+
+    try:
+        already_refreshed = _league_stats_refreshed_today(client)
+    except Exception as exc:  # pragma: no cover - defensive logging
+        print(
+            "Unable to determine if league_pg_stats_by_season was refreshed today:",
+            f"{exc}. Running refresh.",
+        )
+        already_refreshed = False
+
+    if already_refreshed:
+        print("league_pg_stats_by_season already refreshed today; skipping refresh.")
+    else:
+        refresh_league_pg_stats(client=client)
