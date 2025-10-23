@@ -3,6 +3,14 @@ CREATE TABLE IF NOT EXISTS `fantasy-survivor-app.nba_data.player_daily_game_stat
   game_id INT64,
   player_id INT64,
   player_name STRING,
+  team_id INT64,
+  team_abbr STRING,
+  team_city STRING,
+  team_name STRING,
+  team_slug STRING,
+  position STRING,
+  comment STRING,
+  jersey_num STRING,
   minutes FLOAT64,
   fgm INT64,
   fga INT64,
@@ -22,6 +30,7 @@ CREATE TABLE IF NOT EXISTS `fantasy-survivor-app.nba_data.player_daily_game_stat
   pf INT64,
   dreb INT64,
   oreb INT64,
+  plus_minus INT64,
   z_score FLOAT64,
   season STRING
 )

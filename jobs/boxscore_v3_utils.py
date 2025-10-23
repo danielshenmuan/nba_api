@@ -184,11 +184,28 @@ _COLUMN_SOURCE_MAP: dict[str, str] = {
 }
 
 
+_STRING_COLUMN_MAP: dict[str, str] = {
+    "teamCity": "TEAM_CITY",
+    "teamName": "TEAM_NAME",
+    "teamSlug": "TEAM_SLUG",
+    "position": "POSITION",
+    "comment": "COMMENT",
+    "jerseyNum": "JERSEY_NUM",
+}
+
+
 _EXPECTED_COLUMNS: Iterable[str] = (
     "GAME_ID",
     "PLAYER_ID",
     "PLAYER_NAME",
+    "TEAM_ID",
     "TEAM_ABBREVIATION",
+    "TEAM_CITY",
+    "TEAM_NAME",
+    "TEAM_SLUG",
+    "POSITION",
+    "COMMENT",
+    "JERSEY_NUM",
     "MINUTES",
     "FGM",
     "FGA",
@@ -208,6 +225,7 @@ _EXPECTED_COLUMNS: Iterable[str] = (
     "TO",
     "PF",
     "PTS",
+    "PLUS_MINUS",
     "GAME_DATE",
 )
 
@@ -253,9 +271,22 @@ def map_traditional_boxscore(
 
     team_series = df.get("teamTricode")
     if team_series is not None:
-        df["TEAM_ABBREVIATION"] = team_series.fillna("").astype(str).str.upper()
+        df["TEAM_ABBREVIATION"] = team_series.astype("string").str.upper()
     else:
-        df["TEAM_ABBREVIATION"] = ""
+        df["TEAM_ABBREVIATION"] = pd.NA
+
+    team_id_series = df.get("teamId")
+    if team_id_series is not None:
+        df["TEAM_ID"] = pd.to_numeric(team_id_series, errors="coerce")
+    else:
+        df["TEAM_ID"] = pd.NA
+
+    for source, target in _STRING_COLUMN_MAP.items():
+        series = df.get(source)
+        if series is None:
+            df[target] = pd.NA
+        else:
+            df[target] = series.astype("string")
 
     minutes_series = df.get("minutes")
     if minutes_series is not None:
@@ -269,6 +300,12 @@ def map_traditional_boxscore(
             df[target] = pd.NA
         else:
             df[target] = pd.to_numeric(series, errors="coerce")
+
+    plus_minus_series = df.get("plusMinusPoints")
+    if plus_minus_series is not None:
+        df["PLUS_MINUS"] = pd.to_numeric(plus_minus_series, errors="coerce")
+    else:
+        df["PLUS_MINUS"] = pd.NA
 
     df["GAME_ID"] = str(game_id)
     df["GAME_DATE"] = game_date

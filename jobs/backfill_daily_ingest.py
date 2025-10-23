@@ -23,10 +23,16 @@ from jobs.boxscore_v3_utils import (
     load_traditional_boxscore,
     map_traditional_boxscore,
 )
-from jobs.daily_ingest import build_bq_payload, compute_zscores, refresh_league_pg_stats
+from jobs.daily_ingest import (
+    build_bq_payload,
+    compute_zscores,
+    load_into_bigquery_tables,
+    refresh_league_pg_stats,
+)
 
 DEFAULT_PROJECT = "fantasy-survivor-app"
 DEFAULT_TABLE = "fantasy-survivor-app.nba_data.player_daily_game_stats_p"
+DEFAULT_MIRROR_TABLE = "fantasy-survivor-app.nba_data.player_daily_game_stats"
 DEFAULT_TIMEOUT = BOX_DEFAULT_TIMEOUT
 DEFAULT_RETRIES = BOX_DEFAULT_RETRIES
 
@@ -117,6 +123,18 @@ def _parse_args() -> argparse.Namespace:
         help="Fully-qualified BigQuery table to append results to.",
     )
     parser.add_argument(
+        "--mirror-table",
+        default=DEFAULT_MIRROR_TABLE,
+        help=(
+            "Optional non-partitioned table to mirror (defaults to player_daily_game_stats)."
+        ),
+    )
+    parser.add_argument(
+        "--skip-mirror",
+        action="store_true",
+        help="Skip loading into the mirror table.",
+    )
+    parser.add_argument(
         "--skip-refresh",
         action="store_true",
         help="Skip refreshing league_pg_stats_by_season after loading data.",
@@ -170,14 +188,16 @@ def main() -> int:
 
     _display_frame(df, args.max_rows)
 
+    mirror_table = None if args.skip_mirror else args.mirror_table
+
     client = bigquery.Client(project=args.project)
-    job = client.load_table_from_dataframe(
+    load_into_bigquery_tables(
         df,
-        args.table,
-        job_config=bigquery.LoadJobConfig(write_disposition="WRITE_APPEND"),
+        client=client,
+        project_id=args.project,
+        partitioned_table=args.table,
+        mirror_table=mirror_table,
     )
-    job.result()
-    print(f"Loaded {len(df)} rows into {args.table} for {target_date.date()}.")
 
     if not args.skip_refresh:
         refresh_league_pg_stats()

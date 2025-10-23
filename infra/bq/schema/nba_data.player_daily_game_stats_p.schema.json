@@ -12,6 +12,14 @@
     { "name": "game_id", "type": "INTEGER", "mode": "NULLABLE", "description": "" },
     { "name": "player_id", "type": "INTEGER", "mode": "NULLABLE", "description": "" },
     { "name": "player_name", "type": "STRING", "mode": "NULLABLE", "description": "" },
+    { "name": "team_id", "type": "INTEGER", "mode": "NULLABLE", "description": "" },
+    { "name": "team_abbr", "type": "STRING", "mode": "NULLABLE", "description": "" },
+    { "name": "team_city", "type": "STRING", "mode": "NULLABLE", "description": "" },
+    { "name": "team_name", "type": "STRING", "mode": "NULLABLE", "description": "" },
+    { "name": "team_slug", "type": "STRING", "mode": "NULLABLE", "description": "" },
+    { "name": "position", "type": "STRING", "mode": "NULLABLE", "description": "" },
+    { "name": "comment", "type": "STRING", "mode": "NULLABLE", "description": "" },
+    { "name": "jersey_num", "type": "STRING", "mode": "NULLABLE", "description": "" },
     { "name": "minutes", "type": "FLOAT", "mode": "NULLABLE", "description": "" },
     { "name": "fgm", "type": "INTEGER", "mode": "NULLABLE", "description": "" },
     { "name": "fga", "type": "INTEGER", "mode": "NULLABLE", "description": "" },
@@ -31,6 +39,7 @@
     { "name": "pf", "type": "INTEGER", "mode": "NULLABLE", "description": "" },
     { "name": "dreb", "type": "INTEGER", "mode": "NULLABLE", "description": "" },
     { "name": "oreb", "type": "INTEGER", "mode": "NULLABLE", "description": "" },
+    { "name": "plus_minus", "type": "INTEGER", "mode": "NULLABLE", "description": "" },
     { "name": "z_score", "type": "FLOAT", "mode": "NULLABLE", "description": "" },
     { "name": "season", "type": "STRING", "mode": "NULLABLE", "description": "" }
   ]

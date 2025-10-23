@@ -25,6 +25,10 @@ from jobs.boxscore_v3_utils import (
 WEIGHTED_MEAN = [11.69, 4.32, 2.76, 0.75, 0.50, 1.28, 0.47, 0.75, 1.33]
 WEIGHTED_STD = [7.23, 2.51, 2.09, 0.38, 0.45, 0.95, 0.082, 0.124, 0.85]
 
+DEFAULT_PROJECT_ID = "fantasy-survivor-app"
+PARTITIONED_TABLE = "fantasy-survivor-app.nba_data.player_daily_game_stats_p"
+MIRROR_TABLE = "fantasy-survivor-app.nba_data.player_daily_game_stats"
+
 
 def _season_from_date(d: date) -> str:
     year = d.year
@@ -121,6 +125,7 @@ def build_bq_payload(frame: pd.DataFrame, season_value: str | None = None) -> pd
     df = frame.copy()
     df["PLAYER_ID"] = pd.to_numeric(df["PLAYER_ID"], errors="coerce")
     df["GAME_ID_INT"] = pd.to_numeric(df["GAME_ID"], errors="coerce")
+    df["TEAM_ID_INT"] = pd.to_numeric(df["TEAM_ID"], errors="coerce")
     df["MINUTES_FLOAT"] = df["MINUTES"].apply(minutes_to_float)
     df["GAME_DATE"] = pd.to_datetime(df["GAME_DATE"]).dt.date
 
@@ -135,6 +140,9 @@ def build_bq_payload(frame: pd.DataFrame, season_value: str | None = None) -> pd
 
     if df.empty:
         return pd.DataFrame()
+
+    def _string_series(series: pd.Series) -> pd.Series:
+        return series.astype("string").replace({pd.NA: None}).astype(object)
 
     int_map = {
         "fgm": "FGM",
@@ -152,6 +160,7 @@ def build_bq_payload(frame: pd.DataFrame, season_value: str | None = None) -> pd
         "pf": "PF",
         "dreb": "DREB",
         "oreb": "OREB",
+        "plus_minus": "PLUS_MINUS",
     }
 
     float_map = {
@@ -165,6 +174,14 @@ def build_bq_payload(frame: pd.DataFrame, season_value: str | None = None) -> pd
         "game_id": df["GAME_ID_INT"].astype("Int64"),
         "player_id": df["PLAYER_ID"].astype("Int64"),
         "player_name": df["PLAYER_NAME"].astype(str),
+        "team_id": df["TEAM_ID_INT"].astype("Int64"),
+        "team_abbr": _string_series(df["TEAM_ABBREVIATION"]),
+        "team_city": _string_series(df["TEAM_CITY"]),
+        "team_name": _string_series(df["TEAM_NAME"]),
+        "team_slug": _string_series(df["TEAM_SLUG"]),
+        "position": _string_series(df["POSITION"]),
+        "comment": _string_series(df["COMMENT"]),
+        "jersey_num": _string_series(df["JERSEY_NUM"]),
         "minutes": df["MINUTES_FLOAT"].astype(float),
     }
 
@@ -183,6 +200,14 @@ def build_bq_payload(frame: pd.DataFrame, season_value: str | None = None) -> pd
         "game_id",
         "player_id",
         "player_name",
+        "team_id",
+        "team_abbr",
+        "team_city",
+        "team_name",
+        "team_slug",
+        "position",
+        "comment",
+        "jersey_num",
         "minutes",
         "fgm",
         "fga",
@@ -202,6 +227,7 @@ def build_bq_payload(frame: pd.DataFrame, season_value: str | None = None) -> pd
         "pf",
         "dreb",
         "oreb",
+        "plus_minus",
         "z_score",
         "season",
     ]
@@ -250,6 +276,53 @@ def refresh_league_pg_stats() -> None:
     print("Refreshed league_pg_stats_by_season ✅")
 
 
+def load_into_bigquery_tables(
+    df: pd.DataFrame,
+    *,
+    client: bigquery.Client | None = None,
+    project_id: str = DEFAULT_PROJECT_ID,
+    partitioned_table: str = PARTITIONED_TABLE,
+    mirror_table: str | None = MIRROR_TABLE,
+    delete_mirror_dates: bool = True,
+) -> None:
+    """Append ``df`` into the partitioned table and optional mirror table."""
+
+    if df.empty:
+        print("No rows provided for BigQuery load.")
+        return
+
+    bq_client = client or bigquery.Client(project=project_id)
+    load_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
+
+    job = bq_client.load_table_from_dataframe(df, partitioned_table, job_config=load_config)
+    job.result()
+    print(f"Loaded {len(df)} rows into {partitioned_table}.")
+
+    if not mirror_table:
+        return
+
+    if delete_mirror_dates:
+        non_null_dates = [
+            pd.to_datetime(value).date()
+            for value in df["game_date"].dropna().unique().tolist()
+        ]
+        if non_null_dates:
+            delete_sql = f"DELETE FROM `{mirror_table}` WHERE game_date IN UNNEST(@dates)"
+            delete_job = bq_client.query(
+                delete_sql,
+                job_config=bigquery.QueryJobConfig(
+                    query_parameters=[
+                        bigquery.ArrayQueryParameter("dates", "DATE", non_null_dates)
+                    ]
+                ),
+            )
+            delete_job.result()
+
+    mirror_job = bq_client.load_table_from_dataframe(df, mirror_table, job_config=load_config)
+    mirror_job.result()
+    print(f"Loaded {len(df)} rows into {mirror_table}.")
+
+
 if __name__ == "__main__":
     target_date = datetime.today() - timedelta(days=1)
     df = run_ingestion(target_date)
@@ -257,15 +330,10 @@ if __name__ == "__main__":
     if df.empty:
         print("No rows to load.")
     else:
-        client = bigquery.Client(project="fantasy-survivor-app")
-        table = "fantasy-survivor-app.nba_data.player_daily_game_stats_p"
-
-        job = client.load_table_from_dataframe(
+        load_into_bigquery_tables(
             df,
-            table,
-            job_config=bigquery.LoadJobConfig(write_disposition="WRITE_APPEND"),
+            project_id=DEFAULT_PROJECT_ID,
+            partitioned_table=PARTITIONED_TABLE,
+            mirror_table=MIRROR_TABLE,
         )
-        job.result()
-        print(f"Loaded {len(df)} rows into {table} for {target_date.date()}")
-
         refresh_league_pg_stats()
