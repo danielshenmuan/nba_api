@@ -4,20 +4,36 @@ from __future__ import annotations
 import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
+import sys
 
 import numpy as np
 import pandas as pd
 from google.cloud import bigquery
 from requests.exceptions import RequestException
 
-from jobs.boxscore_v3_utils import (
-    DEFAULT_RETRIES,
-    DEFAULT_TIMEOUT,
-    discover_game_ids,
-    load_traditional_boxscore,
-    map_traditional_boxscore,
-    minutes_to_float,
-)
+try:
+    from jobs.boxscore_v3_utils import (
+        DEFAULT_RETRIES,
+        DEFAULT_TIMEOUT,
+        discover_game_ids,
+        load_traditional_boxscore,
+        map_traditional_boxscore,
+        minutes_to_float,
+    )
+except ModuleNotFoundError as exc:
+    if exc.name != "jobs":
+        raise
+    CURRENT_DIR = Path(__file__).resolve().parent
+    if str(CURRENT_DIR) not in sys.path:
+        sys.path.insert(0, str(CURRENT_DIR))
+    from boxscore_v3_utils import (  # type: ignore
+        DEFAULT_RETRIES,
+        DEFAULT_TIMEOUT,
+        discover_game_ids,
+        load_traditional_boxscore,
+        map_traditional_boxscore,
+        minutes_to_float,
+    )
 
 # ----------------------------
 # Baseline stats (update each season if needed)
