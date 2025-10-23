@@ -3,12 +3,10 @@
 #
 # Usage:
 #   chmod +x deploy_daily_ingest.sh
-#   IMAGE_REPO=us-central1-docker.pkg.dev/fantasy-survivor-app/nba-jobs \
-#     ./deploy_daily_ingest.sh
+#   ./deploy_daily_ingest.sh
 #
-# Required environment variables:
-#   IMAGE_REPO  Artifact Registry repo (e.g., us-central1-docker.pkg.dev/PROJECT/repo)
 # Optional environment variables:
+#   IMAGE_REPO       (default: us-central1-docker.pkg.dev/$PROJECT_ID/nba-jobs)
 #   PROJECT_ID       (default: fantasy-survivor-app)
 #   REGION           (default: us-central1)
 #   JOB_NAME         (default: nba-daily-ingest)
@@ -24,8 +22,7 @@ JOB_NAME=${JOB_NAME:-nba-daily-ingest}
 IMAGE_TAG=${IMAGE_TAG:-$(date +%Y%m%d%H%M%S)}
 
 if [[ -z "${IMAGE_REPO:-}" ]]; then
-  echo "ERROR: IMAGE_REPO must be set (e.g., us-central1-docker.pkg.dev/${PROJECT_ID}/nba-jobs)" >&2
-  exit 1
+  IMAGE_REPO="us-central1-docker.pkg.dev/${PROJECT_ID}/nba-jobs"
 fi
 
 IMAGE_URI="${IMAGE_REPO}/nba-daily-ingest:${IMAGE_TAG}"

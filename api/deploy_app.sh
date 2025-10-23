@@ -3,12 +3,10 @@
 #
 # Usage:
 #   chmod +x deploy_app.sh
-#   IMAGE_REPO=us-central1-docker.pkg.dev/fantasy-survivor-app/nba-api \
-#     ./deploy_app.sh
+#   ./deploy_app.sh
 #
-# Required environment variables:
-#   IMAGE_REPO  Artifact Registry repo (e.g. us-central1-docker.pkg.dev/PROJECT/repo)
 # Optional environment variables:
+#   IMAGE_REPO       (default: us-central1-docker.pkg.dev/$PROJECT_ID/nba-api)
 #   PROJECT_ID       (default: fantasy-survivor-app)
 #   REGION           (default: us-central1)
 #   SERVICE_NAME     (default: nba-api)
@@ -26,8 +24,7 @@ IMAGE_TAG=${IMAGE_TAG:-$(date +%Y%m%d%H%M%S)}
 PLATFORM=${PLATFORM:-managed}
 
 if [[ -z "${IMAGE_REPO:-}" ]]; then
-  echo "ERROR: IMAGE_REPO must be set (e.g., us-central1-docker.pkg.dev/${PROJECT_ID}/nba-api)" >&2
-  exit 1
+  IMAGE_REPO="us-central1-docker.pkg.dev/${PROJECT_ID}/nba-api"
 fi
 
 IMAGE_URI="${IMAGE_REPO}/nba-api:${IMAGE_TAG}"
