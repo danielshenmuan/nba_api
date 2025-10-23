@@ -299,6 +299,22 @@ def load_into_bigquery_tables(
     ) -> pd.DataFrame:
         table_obj = bq_client.get_table(table_ref)
         schema_columns = [field.name for field in table_obj.schema]
+        schema_set = set(schema_columns)
+
+        if "min" in schema_set:
+            raise ValueError(
+                "BigQuery table"
+                f" {table_obj.full_table_id} still contains a 'min' column."
+                " Rename it to 'minutes' so the ingestion payload aligns with the"
+                " updated schema."
+            )
+
+        if "minutes" not in schema_set:
+            raise ValueError(
+                "BigQuery table"
+                f" {table_obj.full_table_id} is missing the required 'minutes' column."
+                " Update the warehouse schema to use 'minutes' instead of 'min'."
+            )
 
         aligned = frame.copy()
         extra_cols = [col for col in aligned.columns if col not in schema_columns]
