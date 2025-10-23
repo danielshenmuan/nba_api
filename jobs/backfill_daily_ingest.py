@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import sys
 import time
 from datetime import datetime
@@ -14,42 +15,41 @@ from requests.exceptions import RequestException
 
 CURRENT_DIR = Path(__file__).resolve().parent
 
-try:  # pragma: no cover - support packaged and flat layouts
-    from jobs.boxscore_v3_utils import (  # type: ignore
-        DEFAULT_RETRIES as BOX_DEFAULT_RETRIES,
-        DEFAULT_TIMEOUT as BOX_DEFAULT_TIMEOUT,
-        discover_game_ids,
-        load_traditional_boxscore,
-        map_traditional_boxscore,
+
+def _import_module(*names: tuple[str, bool]):  # pragma: no cover - import helper
+    """Attempt to import the first available module.
+
+    Each tuple is (module_name, ensure_current_dir)."""
+
+    for module_name, add_current in names:
+        try:
+            if add_current and str(CURRENT_DIR) not in sys.path:
+                sys.path.insert(0, str(CURRENT_DIR))
+            return importlib.import_module(module_name)
+        except ModuleNotFoundError:
+            continue
+    raise ModuleNotFoundError(
+        f"Unable to import any of: {[name for name, _ in names]}. Ensure they are packaged."
     )
-    from jobs.daily_ingest import (  # type: ignore
-        build_bq_payload,
-        compute_zscores,
-        load_into_bigquery_tables,
-        refresh_league_pg_stats,
-    )
-except ModuleNotFoundError:  # pragma: no cover - local execution fallback
-    if str(CURRENT_DIR) not in sys.path:
-        sys.path.insert(0, str(CURRENT_DIR))
-    from boxscore_v3_utils import (  # type: ignore
-        DEFAULT_RETRIES as BOX_DEFAULT_RETRIES,
-        DEFAULT_TIMEOUT as BOX_DEFAULT_TIMEOUT,
-        discover_game_ids,
-        load_traditional_boxscore,
-        map_traditional_boxscore,
-    )
-    from daily_ingest import (  # type: ignore
-        build_bq_payload,
-        compute_zscores,
-        load_into_bigquery_tables,
-        refresh_league_pg_stats,
-    )
+
+
+_box_utils = _import_module(("jobs.boxscore_v3_utils", False), ("boxscore_v3_utils", True))
+_ingest_module = _import_module(("jobs.daily_ingest", False), ("daily_ingest", True))
+
+DEFAULT_RETRIES = _box_utils.DEFAULT_RETRIES
+DEFAULT_TIMEOUT = _box_utils.DEFAULT_TIMEOUT
+discover_game_ids = _box_utils.discover_game_ids
+load_traditional_boxscore = _box_utils.load_traditional_boxscore
+map_traditional_boxscore = _box_utils.map_traditional_boxscore
+
+build_bq_payload = _ingest_module.build_bq_payload
+compute_zscores = _ingest_module.compute_zscores
+load_into_bigquery_tables = _ingest_module.load_into_bigquery_tables
+refresh_league_pg_stats = _ingest_module.refresh_league_pg_stats
 
 DEFAULT_PROJECT = "fantasy-survivor-app"
 DEFAULT_TABLE = "fantasy-survivor-app.nba_data.player_daily_game_stats_p"
 DEFAULT_MIRROR_TABLE = "fantasy-survivor-app.nba_data.player_daily_game_stats"
-DEFAULT_TIMEOUT = BOX_DEFAULT_TIMEOUT
-DEFAULT_RETRIES = BOX_DEFAULT_RETRIES
 
 
 def _season_from_date(day: datetime) -> str:

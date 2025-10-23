@@ -1,10 +1,11 @@
 """Ingest NBA box scores into player_daily_game_stats_p."""
 from __future__ import annotations
 
+import importlib
+import sys
 import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
-import sys
 
 import numpy as np
 import pandas as pd
@@ -13,26 +14,29 @@ from requests.exceptions import RequestException
 
 CURRENT_DIR = Path(__file__).resolve().parent
 
-try:  # pragma: no cover - import fallback for Cloud Run images
-    from jobs.boxscore_v3_utils import (  # type: ignore
-        DEFAULT_RETRIES,
-        DEFAULT_TIMEOUT,
-        discover_game_ids,
-        load_traditional_boxscore,
-        map_traditional_boxscore,
-        minutes_to_float,
+
+def _import_boxscore_utils():  # pragma: no cover - import helper for Cloud Run images
+    candidates = ("jobs.boxscore_v3_utils", "boxscore_v3_utils")
+    for name in candidates:
+        try:
+            if name == "boxscore_v3_utils" and str(CURRENT_DIR) not in sys.path:
+                sys.path.insert(0, str(CURRENT_DIR))
+            return importlib.import_module(name)
+        except ModuleNotFoundError:
+            continue
+    raise ModuleNotFoundError(
+        "Unable to import boxscore_v3_utils. Ensure it is packaged with the job image."
     )
-except ModuleNotFoundError:  # pragma: no cover - local script execution
-    if str(CURRENT_DIR) not in sys.path:
-        sys.path.insert(0, str(CURRENT_DIR))
-    from boxscore_v3_utils import (  # type: ignore
-        DEFAULT_RETRIES,
-        DEFAULT_TIMEOUT,
-        discover_game_ids,
-        load_traditional_boxscore,
-        map_traditional_boxscore,
-        minutes_to_float,
-    )
+
+
+_boxscore_utils = _import_boxscore_utils()
+
+DEFAULT_RETRIES = _boxscore_utils.DEFAULT_RETRIES
+DEFAULT_TIMEOUT = _boxscore_utils.DEFAULT_TIMEOUT
+discover_game_ids = _boxscore_utils.discover_game_ids
+load_traditional_boxscore = _boxscore_utils.load_traditional_boxscore
+map_traditional_boxscore = _boxscore_utils.map_traditional_boxscore
+minutes_to_float = _boxscore_utils.minutes_to_float
 
 # ----------------------------
 # Baseline stats (update each season if needed)

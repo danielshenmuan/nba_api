@@ -1,10 +1,11 @@
 """Materialize player_daily_game_stats_p-shaped rows via BoxScoreTraditionalV3."""
 from __future__ import annotations
 
+import importlib
+import sys
 from argparse import ArgumentParser
 from datetime import date, datetime
 from pathlib import Path
-import sys
 import time
 from typing import Iterable
 
@@ -12,22 +13,35 @@ import pandas as pd
 from requests.exceptions import RequestException
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+JOBS_DIR = REPO_ROOT / "jobs"
 
-from jobs.boxscore_v3_utils import (
-    DEFAULT_RETRIES as BOX_DEFAULT_RETRIES,
-    DEFAULT_TIMEOUT as BOX_DEFAULT_TIMEOUT,
-    discover_game_ids,
-    load_traditional_boxscore,
-    map_traditional_boxscore,
-)
-from jobs.daily_ingest import build_bq_payload, compute_zscores
+for path in (REPO_ROOT, JOBS_DIR):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
+
+
+def _import_module(*names: str):  # pragma: no cover - import helper
+    for module_name in names:
+        try:
+            return importlib.import_module(module_name)
+        except ModuleNotFoundError:
+            continue
+    raise ModuleNotFoundError(f"Unable to import any of: {names}")
+
+
+_box_utils = _import_module("jobs.boxscore_v3_utils", "boxscore_v3_utils")
+_ingest_module = _import_module("jobs.daily_ingest", "daily_ingest")
+
+DEFAULT_TIMEOUT = _box_utils.DEFAULT_TIMEOUT
+DEFAULT_RETRIES = _box_utils.DEFAULT_RETRIES
+discover_game_ids = _box_utils.discover_game_ids
+load_traditional_boxscore = _box_utils.load_traditional_boxscore
+map_traditional_boxscore = _box_utils.map_traditional_boxscore
+build_bq_payload = _ingest_module.build_bq_payload
+compute_zscores = _ingest_module.compute_zscores
 
 # Set this to a YYYY-MM-DD string to force a specific date without passing --date.
 MANUAL_DATE: str | None = None
-DEFAULT_TIMEOUT = BOX_DEFAULT_TIMEOUT
-DEFAULT_RETRIES = BOX_DEFAULT_RETRIES
 
 
 def _season_from_date(day: date) -> str:
