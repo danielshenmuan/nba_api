@@ -18,6 +18,7 @@ _MINUTES_ISO_PATTERN = re.compile(
 
 DEFAULT_TIMEOUT = 30
 DEFAULT_RETRIES = 3
+_FINAL_STATUS_ID = "3"
 
 
 def discover_game_ids(
@@ -25,6 +26,7 @@ def discover_game_ids(
     *,
     retries: int = DEFAULT_RETRIES,
     timeout: int = DEFAULT_TIMEOUT,
+    include_non_final: bool = False,
 ) -> list[str]:
     """Return game IDs for ``target_date`` using the ScoreboardV2 endpoint."""
 
@@ -43,9 +45,17 @@ def discover_game_ids(
             )
             data = response.get_normalized_dict()
             headers = data.get("GameHeader", []) if data else []
-            return sorted(
-                {str(row["GAME_ID"]) for row in headers if row.get("GAME_ID")}
-            )
+            game_ids: set[str] = set()
+            for row in headers:
+                gid = row.get("GAME_ID")
+                if not gid:
+                    continue
+                if not include_non_final:
+                    status_id = row.get("GAME_STATUS_ID")
+                    if status_id is None or str(status_id) != _FINAL_STATUS_ID:
+                        continue
+                game_ids.add(str(gid))
+            return sorted(game_ids)
         except Exception as exc:  # noqa: BLE001 - stats SDK raises generic exceptions
             if isinstance(exc, KeyboardInterrupt):
                 raise

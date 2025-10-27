@@ -3,9 +3,9 @@ from __future__ import annotations
 
 import importlib
 import sys
-import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
 import pandas as pd
@@ -38,6 +38,8 @@ discover_game_ids = _boxscore_utils.discover_game_ids
 load_traditional_boxscore = _boxscore_utils.load_traditional_boxscore
 map_traditional_boxscore = _boxscore_utils.map_traditional_boxscore
 minutes_to_float = _boxscore_utils.minutes_to_float
+
+MAX_BOX_SCORE_WORKERS = 6
 
 # ----------------------------
 # Baseline stats (update each season if needed)
@@ -122,33 +124,49 @@ def _locate_sql_file(filename: str) -> Path:
     )
 
 
-def _collect_boxscores(
+def collect_boxscores(
     game_ids: list[str],
     target_date: datetime,
     *,
     retries: int = DEFAULT_RETRIES,
     timeout: int = DEFAULT_TIMEOUT,
+    max_workers: int = MAX_BOX_SCORE_WORKERS,
 ) -> pd.DataFrame:
+    if not game_ids:
+        return pd.DataFrame()
+
     frames: list[pd.DataFrame] = []
+    workers = max(1, min(max_workers, len(game_ids)))
 
-    for game_id in game_ids:
-        try:
-            raw = load_traditional_boxscore(game_id, retries=retries, timeout=timeout)
-        except RequestException as exc:
-            print(f"Skipping {game_id}: {exc}")
-            continue
-
+    def _fetch(game_id: str) -> tuple[pd.DataFrame | None, str | None]:
+        raw = load_traditional_boxscore(game_id, retries=retries, timeout=timeout)
         if raw.empty:
-            print(f"Skipping {game_id}: box score payload not available yet.")
-            continue
+            return None, "box score payload not available yet."
 
         mapped = map_traditional_boxscore(raw, game_id, target_date.date())
         if mapped.empty:
-            print(f"Skipping {game_id}: box score missing required player data.")
-            continue
+            return None, "box score missing required player data."
 
-        frames.append(mapped)
-        time.sleep(0.3)
+        return mapped, None
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        future_map = {executor.submit(_fetch, game_id): game_id for game_id in game_ids}
+        for future in as_completed(future_map):
+            game_id = future_map[future]
+            try:
+                mapped, warning = future.result()
+            except RequestException as exc:
+                print(f"Skipping {game_id}: {exc}")
+                continue
+            except Exception as exc:  # pragma: no cover - defensive logging
+                print(f"Skipping {game_id}: unexpected error {exc}")
+                continue
+
+            if warning:
+                print(f"Skipping {game_id}: {warning}")
+                continue
+
+            frames.append(mapped)
 
     combined = _collect_boxscores(game_ids, target_date, retries=retries, timeout=timeout)
     if combined.empty:
@@ -332,7 +350,9 @@ def run_ingestion(
         print(f"No games found on {target_date.date()}.")
         return pd.DataFrame()
 
-    combined = _collect_boxscores(game_ids, target_date, retries=retries, timeout=timeout)
+    combined = collect_boxscores(
+        game_ids, target_date, retries=retries, timeout=timeout
+    )
     if combined.empty:
         print("No player stats returned; nothing to load.")
         return pd.DataFrame()

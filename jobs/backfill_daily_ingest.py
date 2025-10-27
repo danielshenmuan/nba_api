@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 import importlib
 import sys
-import time
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable
@@ -39,10 +38,9 @@ _ingest_module = _import_module(("jobs.daily_ingest", False), ("daily_ingest", T
 DEFAULT_RETRIES = _box_utils.DEFAULT_RETRIES
 DEFAULT_TIMEOUT = _box_utils.DEFAULT_TIMEOUT
 discover_game_ids = _box_utils.discover_game_ids
-load_traditional_boxscore = _box_utils.load_traditional_boxscore
-map_traditional_boxscore = _box_utils.map_traditional_boxscore
 
 build_bq_payload = _ingest_module.build_bq_payload
+collect_boxscores = _ingest_module.collect_boxscores
 compute_zscores = _ingest_module.compute_zscores
 load_into_bigquery_tables = _ingest_module.load_into_bigquery_tables
 refresh_league_pg_stats = _ingest_module.refresh_league_pg_stats
@@ -66,31 +64,16 @@ def _build_bq_frame(
     retries: int = DEFAULT_RETRIES,
     timeout: int = DEFAULT_TIMEOUT,
 ) -> pd.DataFrame:
-    frames: list[pd.DataFrame] = []
+    combined = collect_boxscores(
+        list(game_ids),
+        target_date,
+        retries=retries,
+        timeout=timeout,
+    )
 
-    for game_id in game_ids:
-        try:
-            raw = load_traditional_boxscore(game_id, retries=retries, timeout=timeout)
-        except RequestException as exc:
-            print(f"Skipping {game_id}: {exc}")
-            continue
-
-        if raw.empty:
-            print(f"Skipping {game_id}: box score not available.")
-            continue
-
-        mapped = map_traditional_boxscore(raw, game_id, target_date.date())
-        if mapped.empty:
-            print(f"Skipping {game_id}: box score missing required player data.")
-            continue
-
-        frames.append(mapped)
-        time.sleep(0.25)
-
-    if not frames:
+    if combined.empty:
         return pd.DataFrame()
 
-    combined = pd.concat(frames, ignore_index=True)
     combined = compute_zscores(combined)
     return build_bq_payload(combined, season_value)
 
