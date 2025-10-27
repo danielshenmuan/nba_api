@@ -6,6 +6,7 @@ import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
 
 import numpy as np
 import pandas as pd
@@ -136,10 +137,11 @@ def collect_boxscores(
         return pd.DataFrame()
 
     frames: list[pd.DataFrame] = []
-    workers = max(1, min(max_workers, len(game_ids)))
+    pending = list(dict.fromkeys(game_ids))  # preserve order, drop duplicates
+    failure_messages: dict[str, str] = {}
 
-    def _fetch(game_id: str) -> tuple[pd.DataFrame | None, str | None]:
-        raw = load_traditional_boxscore(game_id, retries=retries, timeout=timeout)
+    def _fetch_once(game_id: str) -> tuple[pd.DataFrame | None, str | None]:
+        raw = load_traditional_boxscore(game_id, retries=1, timeout=timeout)
         if raw.empty:
             return None, "box score payload not available yet."
 
@@ -149,22 +151,49 @@ def collect_boxscores(
 
         return mapped, None
 
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        future_map = {executor.submit(_fetch, game_id): game_id for game_id in game_ids}
-        for future in as_completed(future_map):
-            game_id = future_map[future]
-            try:
-                mapped, warning = future.result()
-            except RequestException as exc:
-                print(f"Skipping {game_id}: {exc}")
-                continue
-            except Exception as exc:  # pragma: no cover - defensive logging
-                print(f"Skipping {game_id}: unexpected error {exc}")
-                continue
+    for attempt in range(1, max(retries, 1) + 1):
+        if not pending:
+            break
 
-            if warning:
-                print(f"Skipping {game_id}: {warning}")
-                continue
+        workers = max(1, min(max_workers, len(pending)))
+        attempt_failures: list[str] = []
+
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            future_map = {executor.submit(_fetch_once, game_id): game_id for game_id in pending}
+            for future in as_completed(future_map):
+                game_id = future_map[future]
+                try:
+                    mapped, warning = future.result()
+                except RequestException as exc:
+                    failure_messages[game_id] = str(exc)
+                    attempt_failures.append(game_id)
+                    continue
+                except Exception as exc:  # pragma: no cover - defensive logging
+                    failure_messages[game_id] = f"unexpected error {exc}"
+                    attempt_failures.append(game_id)
+                    continue
+
+                if warning:
+                    failure_messages[game_id] = warning
+                    attempt_failures.append(game_id)
+                    continue
+
+                frames.append(mapped)
+                failure_messages.pop(game_id, None)
+
+        pending = attempt_failures
+        if pending and attempt < retries:
+            sleep_seconds = min(5 * attempt, 15)
+            print(
+                f"Retrying {len(pending)} unfinished box score(s) in {sleep_seconds}s..."
+            )
+            time.sleep(sleep_seconds)
+
+    for game_id in pending:
+        reason = failure_messages.get(
+            game_id, "box score payload not available yet."
+        )
+        print(f"Skipping {game_id}: {reason}")
 
             frames.append(mapped)
 
