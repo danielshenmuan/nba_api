@@ -125,7 +125,7 @@ def _locate_sql_file(filename: str) -> Path:
     )
 
 
-def collect_boxscores(
+def _collect_boxscores_impl(
     game_ids: list[str],
     target_date: datetime,
     *,
@@ -133,7 +133,7 @@ def collect_boxscores(
     timeout: int = DEFAULT_TIMEOUT,
     max_workers: int = MAX_BOX_SCORE_WORKERS,
 ) -> pd.DataFrame:
-    """Fetch and normalize box scores for ``game_ids``."""
+    """Internal helper that performs the threaded box score collection."""
 
     if not game_ids:
         return pd.DataFrame()
@@ -166,7 +166,7 @@ def collect_boxscores(
             for future in as_completed(future_map):
                 game_id = future_map[future]
                 try:
-                    mapped, warning = future.result()
+                    result = future.result()
                 except RequestException as exc:
                     failure_messages[game_id] = str(exc)
                     attempt_failures.append(game_id)
@@ -176,10 +176,39 @@ def collect_boxscores(
                     attempt_failures.append(game_id)
                     continue
 
+                mapped: pd.DataFrame | None
+                warning: str | None
+                if isinstance(result, tuple) and len(result) == 2:
+                    mapped, warning = result
+                else:
+                    mapped, warning = result, None
+
                 if warning:
                     failure_messages[game_id] = warning
                     attempt_failures.append(game_id)
                     continue
+
+                if mapped is None or mapped.empty:
+                    failure_messages[game_id] = "box score payload not available yet."
+                    attempt_failures.append(game_id)
+                    continue
+
+                frames.append(mapped)
+                failure_messages.pop(game_id, None)
+
+        pending = attempt_failures
+        if pending and attempt < max_attempts:
+            sleep_seconds = min(5 * attempt, 15)
+            print(
+                f"Retrying {len(pending)} unfinished box score(s) in {sleep_seconds}s..."
+            )
+            time.sleep(sleep_seconds)
+
+        attempt += 1
+
+    for game_id in pending:
+        reason = failure_messages.get(game_id, "box score payload not available yet.")
+        print(f"Skipping {game_id}: {reason}")
 
                 frames.append(mapped)
                 failure_messages.pop(game_id, None)
@@ -206,6 +235,25 @@ def collect_boxscores(
         return pd.DataFrame()
 
     return pd.concat(frames, ignore_index=True)
+
+
+def collect_boxscores(
+    game_ids: list[str],
+    target_date: datetime,
+    *,
+    retries: int = DEFAULT_RETRIES,
+    timeout: int = DEFAULT_TIMEOUT,
+    max_workers: int = MAX_BOX_SCORE_WORKERS,
+) -> pd.DataFrame:
+    """Fetch and normalize box scores for ``game_ids``."""
+
+    return _collect_boxscores_impl(
+        game_ids,
+        target_date,
+        retries=retries,
+        timeout=timeout,
+        max_workers=max_workers,
+    )
 
 
 def build_bq_payload(frame: pd.DataFrame, season_value: str | None = None) -> pd.DataFrame:
