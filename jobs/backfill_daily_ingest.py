@@ -61,13 +61,11 @@ def _build_bq_frame(
     target_date: datetime,
     season_value: str,
     *,
-    retries: int = DEFAULT_RETRIES,
     timeout: int = DEFAULT_TIMEOUT,
 ) -> pd.DataFrame:
     combined = collect_boxscores(
         list(game_ids),
         target_date,
-        retries=retries,
         timeout=timeout,
     )
 
@@ -137,15 +135,6 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip refreshing league_pg_stats_by_season after loading data.",
     )
-    parser.add_argument(
-        "--final-only",
-        action="store_true",
-        help=(
-            "Only ingest games whose ScoreboardV2 status is final. By default the "
-            "script also considers scheduled/in-progress games so long as their "
-            "box scores are published."
-        ),
-    )
     return parser.parse_args()
 
 
@@ -179,7 +168,7 @@ def main() -> int:
                 target_date,
                 retries=DEFAULT_RETRIES,
                 timeout=DEFAULT_TIMEOUT,
-                include_non_final=not args.final_only,
+                include_non_final=False,
             )
         except RequestException as exc:
             print(f"Failed to discover games for {target_date.date()}: {exc}")

@@ -5,8 +5,6 @@ import importlib
 import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import time
 
 import numpy as np
 import pandas as pd
@@ -39,8 +37,6 @@ discover_game_ids = _boxscore_utils.discover_game_ids
 load_traditional_boxscore = _boxscore_utils.load_traditional_boxscore
 map_traditional_boxscore = _boxscore_utils.map_traditional_boxscore
 minutes_to_float = _boxscore_utils.minutes_to_float
-
-MAX_BOX_SCORE_WORKERS = 6
 
 # ----------------------------
 # Baseline stats (update each season if needed)
@@ -125,114 +121,53 @@ def _locate_sql_file(filename: str) -> Path:
     )
 
 
-def _collect_boxscores_impl(
+def collect_boxscores(
     game_ids: list[str],
     target_date: datetime,
     *,
-    retries: int = DEFAULT_RETRIES,
     timeout: int = DEFAULT_TIMEOUT,
-    max_workers: int = MAX_BOX_SCORE_WORKERS,
 ) -> pd.DataFrame:
-    """Internal helper that performs the threaded box score collection."""
+    """Fetch and normalize box scores for ``game_ids``."""
 
     if not game_ids:
         return pd.DataFrame()
 
     frames: list[pd.DataFrame] = []
-    pending = list(dict.fromkeys(game_ids))  # preserve order and drop dupes
-    failure_messages: dict[str, str] = {}
+    seen: set[str] = set()
+    attempts_timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
+    for game_id in game_ids:
+        if game_id in seen:
+            continue
+        seen.add(game_id)
 
-    def _fetch_once(game_id: str) -> tuple[pd.DataFrame | None, str | None]:
-        raw = load_traditional_boxscore(game_id, retries=1, timeout=timeout)
-        if raw.empty:
-            return None, "box score payload not available yet."
-
-        mapped = map_traditional_boxscore(raw, game_id, target_date.date())
-        if mapped.empty:
-            return None, "box score missing required player data."
-
-        return mapped, None
-
-    max_attempts = max(retries, 1)
-    for attempt in range(1, max_attempts + 1):
-        if not pending:
-            break
-
-        workers = max(1, min(max_workers, len(pending)))
-        attempt_failures: list[str] = []
-
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            future_map = {
-                executor.submit(_fetch_once, game_id): game_id for game_id in pending
-            }
-            for future in as_completed(future_map):
-                game_id = future_map[future]
-                try:
-                    result = future.result()
-                except RequestException as exc:
-                    failure_messages[game_id] = str(exc)
-                    attempt_failures.append(game_id)
-                    continue
-                except Exception as exc:  # pragma: no cover - defensive logging
-                    failure_messages[game_id] = f"unexpected error {exc}"
-                    attempt_failures.append(game_id)
-                    continue
-
-                mapped: pd.DataFrame | None
-                warning: str | None
-                if isinstance(result, tuple) and len(result) == 2:
-                    mapped, warning = result
-                else:
-                    mapped, warning = result, None
-
-                if warning:
-                    failure_messages[game_id] = warning
-                    attempt_failures.append(game_id)
-                    continue
-
-                if mapped is None or mapped.empty:
-                    failure_messages[game_id] = "box score payload not available yet."
-                    attempt_failures.append(game_id)
-                    continue
-
-                frames.append(mapped)
-                failure_messages.pop(game_id, None)
-
-        pending = attempt_failures
-        if pending and attempt < max_attempts:
-            sleep_seconds = min(5 * attempt, 15)
-            print(
-                f"Retrying {len(pending)} unfinished box score(s) in {sleep_seconds}s..."
+        try:
+            raw = load_traditional_boxscore(
+                game_id, retries=1, timeout=attempts_timeout
             )
-            time.sleep(sleep_seconds)
+        except RequestException as exc:
+            print(f"Skipping {game_id}: {exc}")
+            continue
 
-    for game_id in pending:
-        reason = failure_messages.get(game_id, "box score payload not available yet.")
-        print(f"Skipping {game_id}: {reason}")
+        if raw.empty:
+            print(f"Skipping {game_id}: box score not available yet.")
+            continue
+
+        try:
+            mapped = map_traditional_boxscore(raw, game_id, target_date.date())
+        except Exception as exc:  # pragma: no cover - defensive logging
+            print(f"Skipping {game_id}: failed to map box score ({exc}).")
+            continue
+
+        if mapped.empty:
+            print(f"Skipping {game_id}: box score missing required player data.")
+            continue
+
+        frames.append(mapped)
 
     if not frames:
         return pd.DataFrame()
 
     return pd.concat(frames, ignore_index=True)
-
-
-def collect_boxscores(
-    game_ids: list[str],
-    target_date: datetime,
-    *,
-    retries: int = DEFAULT_RETRIES,
-    timeout: int = DEFAULT_TIMEOUT,
-    max_workers: int = MAX_BOX_SCORE_WORKERS,
-) -> pd.DataFrame:
-    """Fetch and normalize box scores for ``game_ids``."""
-
-    return _collect_boxscores_impl(
-        game_ids,
-        target_date,
-        retries=retries,
-        timeout=timeout,
-        max_workers=max_workers,
-    )
 
 
 def build_bq_payload(frame: pd.DataFrame, season_value: str | None = None) -> pd.DataFrame:
@@ -414,9 +349,7 @@ def run_ingestion(
         print(f"No games found on {target_date.date()}.")
         return pd.DataFrame()
 
-    combined = collect_boxscores(
-        game_ids, target_date, retries=retries, timeout=timeout
-    )
+    combined = collect_boxscores(game_ids, target_date, timeout=timeout)
     if combined.empty:
         print("No player stats returned; nothing to load.")
         return pd.DataFrame()

@@ -17,8 +17,8 @@ _MINUTES_ISO_PATTERN = re.compile(
     r"PT(?:(?P<minutes>\d+)M)?(?:(?P<seconds>\d+(?:\.\d+)?)S)?"
 )
 
-DEFAULT_TIMEOUT = 30
-DEFAULT_RETRIES = 3
+DEFAULT_TIMEOUT = 10
+DEFAULT_RETRIES = 1
 _FINAL_STATUS_ID = "3"
 
 
@@ -119,7 +119,10 @@ def discover_game_ids(
             continue
         if not include_non_final:
             status = str(game.get("gameStatus", "")).strip()
-            if status and status != _FINAL_STATUS_ID:
+            status_text = str(game.get("gameStatusText", "")).strip().lower()
+            is_final_numeric = status == _FINAL_STATUS_ID if status else False
+            is_final_text = "final" in status_text if status_text else False
+            if not (is_final_numeric or is_final_text):
                 continue
         collected.append(gid_str)
 

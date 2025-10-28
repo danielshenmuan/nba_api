@@ -53,13 +53,11 @@ def _build_bq_frame(
     target_date: datetime,
     season_value: str,
     *,
-    retries: int = DEFAULT_RETRIES,
     timeout: int = DEFAULT_TIMEOUT,
 ) -> pd.DataFrame:
     combined = collect_boxscores(
         list(game_ids),
         target_date,
-        retries=retries,
         timeout=timeout,
     )
 
@@ -100,14 +98,6 @@ def main() -> None:
         default=None,
         help="Optional season override (e.g. 2024-25).",
     )
-    parser.add_argument(
-        "--final-only",
-        action="store_true",
-        help=(
-            "Restrict to games whose ScoreboardV2 status is final. By default the "
-            "script includes scheduled/in-progress games to aid debugging."
-        ),
-    )
     args = parser.parse_args()
 
     target_date = args.date
@@ -126,7 +116,7 @@ def main() -> None:
                 target_date,
                 retries=DEFAULT_RETRIES,
                 timeout=DEFAULT_TIMEOUT,
-                include_non_final=not args.final_only,
+                include_non_final=False,
             )
         except RequestException as exc:
             print(f"Failed to discover games for {target_date.date()}: {exc}")
