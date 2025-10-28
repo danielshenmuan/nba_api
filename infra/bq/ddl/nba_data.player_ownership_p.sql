@@ -1,4 +1,4 @@
-CREATE TABLE `fantasy-survivor-app.nba_data.player_ownership`
+CREATE TABLE `fantasy-survivor-app.nba_data.player_ownership_p`
 (
   snapshot_date DATE NOT NULL,
   ingested_at TIMESTAMP NOT NULL,
@@ -27,4 +27,6 @@ CREATE TABLE `fantasy-survivor-app.nba_data.player_ownership`
   percent_owned_delta FLOAT64,
   percent_owned_coverage_type STRING,
   percent_owned_week INT64
-);
+)
+PARTITION BY snapshot_date
+CLUSTER BY player_id, player_key;
