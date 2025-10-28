@@ -21,7 +21,7 @@ def get_player_baselines_v1(player_id: int, season: str, window: int = 5):
     ),
     season_games AS (
       SELECT
-        d.player_id, d.player_name, d.game_date, d.min as minutes,
+        d.player_id, d.player_name, d.game_date, d.minutes as minutes,
         d.pts, d.reb, d.ast, d.stl, d.blk, d.fg3m, d.fg_pct, d.ft_pct, d.turnovers,
         h.fg_attempts AS fga, h.ft_attempts AS fta
       FROM `{TABLE_DAILY}` d
@@ -29,7 +29,7 @@ def get_player_baselines_v1(player_id: int, season: str, window: int = 5):
       WHERE d.player_id = @pid
         AND d.season = @season          -- fast equality on cluster + prunes by date below
         AND d.game_date BETWEEN s_start AND s_end
-        AND d.min > 0
+        AND d.minutes > 0
     ),
     per_player_pg AS (
       SELECT
