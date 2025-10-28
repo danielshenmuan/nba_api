@@ -8,7 +8,7 @@ from typing import Iterable
 
 import pandas as pd
 from nba_api.live.nba.endpoints import scoreboard as live_scoreboard
-from nba_api.stats.endpoints import BoxScoreTraditionalV3
+from nba_api.stats.endpoints import BoxScoreTraditionalV3, LeagueGameLog
 from nba_api.stats.library.http import NBAStatsHTTP
 from requests.exceptions import RequestException
 
@@ -20,6 +20,15 @@ _MINUTES_ISO_PATTERN = re.compile(
 DEFAULT_TIMEOUT = 30
 DEFAULT_RETRIES = 3
 _FINAL_STATUS_ID = "3"
+
+
+def _season_from_date(d: date) -> str:
+    """Return the NBA season string (e.g. ``2025-26``) for ``d``."""
+
+    year = d.year
+    if d.month >= 10:
+        return f"{year}-{(year + 1) % 100:02d}"
+    return f"{year - 1}-{year % 100:02d}"
 
 
 def discover_game_ids(
@@ -114,7 +123,51 @@ def discover_game_ids(
                 continue
         collected.append(gid_str)
 
-    return sorted(dict.fromkeys(collected))
+    collected = sorted(dict.fromkeys(collected))
+    if collected:
+        return collected
+
+    # Final fallback: derive game IDs from LeagueGameLog for the target date.
+    season = _season_from_date(target_date.date())
+    season_types = [
+        "Regular Season",
+        "Playoffs",
+        "PlayIn",
+        "Pre Season",
+    ]
+
+    for season_type in season_types:
+        try:
+            log = LeagueGameLog(
+                counter=0,
+                date_from_nullable=target_date.strftime("%m/%d/%Y"),
+                date_to_nullable=target_date.strftime("%m/%d/%Y"),
+                league_id_nullable="00",
+                player_or_team="P",
+                season=season,
+                season_type_all_star=season_type,
+                timeout=timeout,
+            )
+            frames = log.get_data_frames()
+        except Exception:
+            continue
+
+        if not frames:
+            continue
+
+        frame = frames[0]
+        if "GAME_ID" not in frame.columns:
+            continue
+
+        game_ids = {
+            _normalize_game_id(value)
+            for value in frame["GAME_ID"].dropna().unique().tolist()
+        }
+        game_ids.discard(None)
+        if game_ids:
+            return sorted(game_ids)
+
+    return []
 
 
 def load_traditional_boxscore(

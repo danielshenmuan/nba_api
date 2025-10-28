@@ -195,6 +195,28 @@ def collect_boxscores(
         )
         print(f"Skipping {game_id}: {reason}")
 
+                if warning:
+                    failure_messages[game_id] = warning
+                    attempt_failures.append(game_id)
+                    continue
+
+                frames.append(mapped)
+                failure_messages.pop(game_id, None)
+
+        pending = attempt_failures
+        if pending and attempt < retries:
+            sleep_seconds = min(5 * attempt, 15)
+            print(
+                f"Retrying {len(pending)} unfinished box score(s) in {sleep_seconds}s..."
+            )
+            time.sleep(sleep_seconds)
+
+    for game_id in pending:
+        reason = failure_messages.get(
+            game_id, "box score payload not available yet."
+        )
+        print(f"Skipping {game_id}: {reason}")
+
         with ThreadPoolExecutor(max_workers=workers) as executor:
             future_map = {executor.submit(_fetch_once, game_id): game_id for game_id in pending}
             for future in as_completed(future_map):
