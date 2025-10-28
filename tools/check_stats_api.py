@@ -100,6 +100,14 @@ def main() -> None:
         default=None,
         help="Optional season override (e.g. 2024-25).",
     )
+    parser.add_argument(
+        "--final-only",
+        action="store_true",
+        help=(
+            "Restrict to games whose ScoreboardV2 status is final. By default the "
+            "script includes scheduled/in-progress games to aid debugging."
+        ),
+    )
     args = parser.parse_args()
 
     target_date = args.date
@@ -115,7 +123,10 @@ def main() -> None:
     else:
         try:
             game_ids = discover_game_ids(
-                target_date, retries=DEFAULT_RETRIES, timeout=DEFAULT_TIMEOUT
+                target_date,
+                retries=DEFAULT_RETRIES,
+                timeout=DEFAULT_TIMEOUT,
+                include_non_final=not args.final_only,
             )
         except RequestException as exc:
             print(f"Failed to discover games for {target_date.date()}: {exc}")
