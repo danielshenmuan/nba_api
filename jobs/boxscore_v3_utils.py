@@ -76,16 +76,28 @@ def discover_game_ids(
                     continue
                 if not include_non_final:
                     status_raw = row.get("GAME_STATUS_ID")
-                    if status_raw is None:
+                    status_text = row.get("GAME_STATUS_TEXT")
+
+                    is_final = False
+                    if status_raw is not None:
+                        status_str = str(status_raw).strip()
+                        if status_str == _FINAL_STATUS_ID:
+                            is_final = True
+                        else:
+                            try:
+                                status_normalized = str(int(float(status_str)))
+                            except (TypeError, ValueError):
+                                status_normalized = ""
+                            if status_normalized == _FINAL_STATUS_ID:
+                                is_final = True
+
+                    if not is_final and status_text:
+                        if str(status_text).strip().lower() == "final":
+                            is_final = True
+
+                    if not is_final:
                         continue
-                    status_str = str(status_raw).strip()
-                    if status_str != _FINAL_STATUS_ID:
-                        try:
-                            status_normalized = str(int(float(status_str)))
-                        except (TypeError, ValueError):
-                            status_normalized = ""
-                        if status_normalized != _FINAL_STATUS_ID:
-                            continue
+
                 game_ids.add(gid_str)
             if game_ids:
                 return sorted(game_ids)
