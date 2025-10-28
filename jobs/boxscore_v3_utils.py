@@ -7,6 +7,7 @@ from datetime import date, datetime
 from typing import Iterable
 
 import pandas as pd
+from nba_api.live.nba.endpoints import scoreboard as live_scoreboard
 from nba_api.stats.endpoints import BoxScoreTraditionalV3
 from nba_api.stats.library.http import NBAStatsHTTP
 from requests.exceptions import RequestException
@@ -36,6 +37,21 @@ def discover_game_ids(
         "LeagueID": "00",
     }
 
+    def _normalize_game_id(raw_value) -> str | None:
+        if not raw_value:
+            return None
+        gid_str = str(raw_value).strip()
+        if not gid_str:
+            return None
+        if "." in gid_str:
+            try:
+                gid_str = f"{int(float(gid_str)):010d}"
+            except (TypeError, ValueError):
+                return None
+        elif gid_str.isdigit() and len(gid_str) < 10:
+            gid_str = gid_str.zfill(10)
+        return gid_str
+
     for attempt in range(retries):
         try:
             response = NBAStatsHTTP().send_api_request(
@@ -47,19 +63,9 @@ def discover_game_ids(
             headers = data.get("GameHeader", []) if data else []
             game_ids: set[str] = set()
             for row in headers:
-                gid_raw = row.get("GAME_ID")
-                if not gid_raw:
-                    continue
-                gid_str = str(gid_raw).strip()
+                gid_str = _normalize_game_id(row.get("GAME_ID"))
                 if not gid_str:
                     continue
-                if "." in gid_str:
-                    try:
-                        gid_str = f"{int(float(gid_str)):010d}"
-                    except (TypeError, ValueError):
-                        continue
-                elif gid_str.isdigit() and len(gid_str) < 10:
-                    gid_str = gid_str.zfill(10)
                 if not include_non_final:
                     status_raw = row.get("GAME_STATUS_ID")
                     if status_raw is None:
@@ -83,7 +89,31 @@ def discover_game_ids(
                 ) from exc
             time.sleep(1)
 
-    return []
+    # Fallback to the live scoreboard feed, which often exposes schedules earlier.
+    try:
+        board = live_scoreboard.ScoreBoard(
+            game_date=target_date.strftime("%Y-%m-%d"), timeout=timeout
+        )
+        board.get_request()
+        board_data = board.get_dict()
+    except Exception as exc:  # noqa: BLE001 - defensive fallback
+        raise RequestException(
+            f"Failed to load live scoreboard data: {exc}"
+        ) from exc
+
+    games = (board_data or {}).get("scoreboard", {}).get("games", [])
+    collected: list[str] = []
+    for game in games:
+        gid_str = _normalize_game_id(game.get("gameId"))
+        if not gid_str:
+            continue
+        if not include_non_final:
+            status = str(game.get("gameStatus", "")).strip()
+            if status and status != _FINAL_STATUS_ID:
+                continue
+        collected.append(gid_str)
+
+    return sorted(dict.fromkeys(collected))
 
 
 def load_traditional_boxscore(
