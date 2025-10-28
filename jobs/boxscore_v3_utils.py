@@ -47,14 +47,32 @@ def discover_game_ids(
             headers = data.get("GameHeader", []) if data else []
             game_ids: set[str] = set()
             for row in headers:
-                gid = row.get("GAME_ID")
-                if not gid:
+                gid_raw = row.get("GAME_ID")
+                if not gid_raw:
                     continue
-                if not include_non_final:
-                    status_id = row.get("GAME_STATUS_ID")
-                    if status_id is None or str(status_id) != _FINAL_STATUS_ID:
+                gid_str = str(gid_raw).strip()
+                if not gid_str:
+                    continue
+                if "." in gid_str:
+                    try:
+                        gid_str = f"{int(float(gid_str)):010d}"
+                    except (TypeError, ValueError):
                         continue
-                game_ids.add(str(gid))
+                elif gid_str.isdigit() and len(gid_str) < 10:
+                    gid_str = gid_str.zfill(10)
+                if not include_non_final:
+                    status_raw = row.get("GAME_STATUS_ID")
+                    if status_raw is None:
+                        continue
+                    status_str = str(status_raw).strip()
+                    if status_str != _FINAL_STATUS_ID:
+                        try:
+                            status_normalized = str(int(float(status_str)))
+                        except (TypeError, ValueError):
+                            status_normalized = ""
+                        if status_normalized != _FINAL_STATUS_ID:
+                            continue
+                game_ids.add(gid_str)
             return sorted(game_ids)
         except Exception as exc:  # noqa: BLE001 - stats SDK raises generic exceptions
             if isinstance(exc, KeyboardInterrupt):
