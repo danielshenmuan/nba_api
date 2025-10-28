@@ -79,7 +79,8 @@ def discover_game_ids(
                         if status_normalized != _FINAL_STATUS_ID:
                             continue
                 game_ids.add(gid_str)
-            return sorted(game_ids)
+            if game_ids:
+                return sorted(game_ids)
         except Exception as exc:  # noqa: BLE001 - stats SDK raises generic exceptions
             if isinstance(exc, KeyboardInterrupt):
                 raise
