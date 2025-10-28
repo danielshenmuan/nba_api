@@ -7,7 +7,6 @@ from datetime import date, datetime
 from typing import Iterable
 
 import pandas as pd
-from nba_api.live.nba.endpoints import scoreboard as live_scoreboard
 from nba_api.stats.endpoints import BoxScoreTraditionalV3, LeagueGameLog
 from nba_api.stats.library.http import NBAStatsHTTP
 from requests.exceptions import RequestException
@@ -98,37 +97,6 @@ def discover_game_ids(
                     f"Failed to load ScoreboardV2 data: {exc}"
                 ) from exc
             time.sleep(1)
-
-    # Fallback to the live scoreboard feed, which often exposes schedules earlier.
-    try:
-        board = live_scoreboard.ScoreBoard(
-            game_date=target_date.strftime("%Y-%m-%d"), timeout=timeout
-        )
-        board.get_request()
-        board_data = board.get_dict()
-    except Exception as exc:  # noqa: BLE001 - defensive fallback
-        raise RequestException(
-            f"Failed to load live scoreboard data: {exc}"
-        ) from exc
-
-    games = (board_data or {}).get("scoreboard", {}).get("games", [])
-    collected: list[str] = []
-    for game in games:
-        gid_str = _normalize_game_id(game.get("gameId"))
-        if not gid_str:
-            continue
-        if not include_non_final:
-            status = str(game.get("gameStatus", "")).strip()
-            status_text = str(game.get("gameStatusText", "")).strip().lower()
-            is_final_numeric = status == _FINAL_STATUS_ID if status else False
-            is_final_text = "final" in status_text if status_text else False
-            if not (is_final_numeric or is_final_text):
-                continue
-        collected.append(gid_str)
-
-    collected = sorted(dict.fromkeys(collected))
-    if collected:
-        return collected
 
     # Final fallback: derive game IDs from LeagueGameLog for the target date.
     season = _season_from_date(target_date.date())

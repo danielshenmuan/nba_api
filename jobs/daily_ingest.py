@@ -164,6 +164,22 @@ def collect_boxscores(
 
         frames.append(mapped)
 
+        if raw.empty:
+            print(f"Skipping {game_id}: box score not available yet.")
+            continue
+
+        try:
+            mapped = map_traditional_boxscore(raw, game_id, target_date.date())
+        except Exception as exc:  # pragma: no cover - defensive logging
+            print(f"Skipping {game_id}: failed to map box score ({exc}).")
+            continue
+
+        if mapped.empty:
+            print(f"Skipping {game_id}: box score missing required player data.")
+            continue
+
+        frames.append(mapped)
+
     max_attempts = max(retries, 1)
     for attempt in range(1, max_attempts + 1):
         if not pending:
