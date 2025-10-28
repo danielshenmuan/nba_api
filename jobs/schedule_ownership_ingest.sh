@@ -31,8 +31,30 @@ SCHEDULE=${SCHEDULE:-"0 1 * * *"}
 TIME_ZONE=${TIME_ZONE:-America/New_York}
 OAUTH_SCOPE=${OAUTH_SCOPE:-"https://www.googleapis.com/auth/cloud-platform"}
 
-if [[ -z "${SCHEDULER_SERVICE_ACCOUNT:-}" ]]; then
-  echo "SCHEDULER_SERVICE_ACCOUNT must be set to the service account that invokes the Cloud Run job." >&2
+resolve_service_account() {
+  if [[ -n "${SCHEDULER_SERVICE_ACCOUNT:-}" ]]; then
+    echo "${SCHEDULER_SERVICE_ACCOUNT}"
+    return
+  fi
+
+  local job_sa
+  job_sa=$(gcloud run jobs describe "${JOB_NAME}" \
+    --project "${PROJECT_ID}" \
+    --region "${REGION}" \
+    --format='value(spec.template.template.serviceAccount)' 2>/dev/null || true)
+
+  if [[ -n "${job_sa}" ]]; then
+    echo "${job_sa}"
+    return
+  fi
+
+  echo ""  # no service account resolved
+}
+
+SCHEDULER_SERVICE_ACCOUNT=$(resolve_service_account)
+
+if [[ -z "${SCHEDULER_SERVICE_ACCOUNT}" ]]; then
+  echo "Unable to determine a service account. Set SCHEDULER_SERVICE_ACCOUNT or ensure the Cloud Run job has one configured." >&2
   exit 1
 fi
 

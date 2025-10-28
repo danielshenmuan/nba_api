@@ -16,6 +16,9 @@
 
 set -euo pipefail
 
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+BUILD_CONTEXT="${SCRIPT_DIR}"
+
 PROJECT_ID=${PROJECT_ID:-fantasy-survivor-app}
 REGION=${REGION:-us-central1}
 JOB_NAME=${JOB_NAME:-nba-daily-ingest}
@@ -62,7 +65,7 @@ ensure_repo_exists "${IMAGE_REPO}"
 IMAGE_URI="${IMAGE_REPO}/nba-daily-ingest:${IMAGE_TAG}"
 
 echo "Building container image ${IMAGE_URI}..."
-gcloud builds submit jobs \
+gcloud builds submit "${BUILD_CONTEXT}" \
   --project "${PROJECT_ID}" \
   --tag "${IMAGE_URI}"
 
