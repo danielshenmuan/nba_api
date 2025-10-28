@@ -164,7 +164,169 @@ def collect_boxscores(
 
         frames.append(mapped)
 
-    if not frames:
+        if raw.empty:
+            print(f"Skipping {game_id}: box score not available yet.")
+            continue
+
+        try:
+            mapped = map_traditional_boxscore(raw, game_id, target_date.date())
+        except Exception as exc:  # pragma: no cover - defensive logging
+            print(f"Skipping {game_id}: failed to map box score ({exc}).")
+            continue
+
+        if mapped.empty:
+            print(f"Skipping {game_id}: box score missing required player data.")
+            continue
+
+        frames.append(mapped)
+
+    max_attempts = max(retries, 1)
+    for attempt in range(1, max_attempts + 1):
+        if not pending:
+            break
+
+        workers = max(1, min(max_workers, len(pending)))
+        attempt_failures: list[str] = []
+
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            future_map = {
+                executor.submit(_fetch_once, game_id): game_id for game_id in pending
+            }
+            for future in as_completed(future_map):
+                game_id = future_map[future]
+                try:
+                    result = future.result()
+                except RequestException as exc:
+                    failure_messages[game_id] = str(exc)
+                    attempt_failures.append(game_id)
+                    continue
+                except Exception as exc:  # pragma: no cover - defensive logging
+                    failure_messages[game_id] = f"unexpected error {exc}"
+                    attempt_failures.append(game_id)
+                    continue
+
+                mapped: pd.DataFrame | None
+                warning: str | None
+                if isinstance(result, tuple) and len(result) == 2:
+                    mapped, warning = result
+                else:
+                    mapped, warning = result, None
+
+                if warning:
+                    failure_messages[game_id] = warning
+                    attempt_failures.append(game_id)
+                    continue
+
+                if mapped is None or mapped.empty:
+                    failure_messages[game_id] = "box score payload not available yet."
+                    attempt_failures.append(game_id)
+                    continue
+
+                frames.append(mapped)
+                failure_messages.pop(game_id, None)
+
+        pending = attempt_failures
+        if pending and attempt < max_attempts:
+            sleep_seconds = min(5 * attempt, 15)
+            print(
+                f"Retrying {len(pending)} unfinished box score(s) in {sleep_seconds}s..."
+            )
+            time.sleep(sleep_seconds)
+
+    for game_id in pending:
+        reason = failure_messages.get(game_id, "box score payload not available yet.")
+        print(f"Skipping {game_id}: {reason}")
+
+    def _fetch_once(game_id: str) -> tuple[pd.DataFrame | None, str | None]:
+        raw = load_traditional_boxscore(game_id, retries=1, timeout=timeout)
+        if raw.empty:
+            return None, "box score payload not available yet."
+
+        mapped = map_traditional_boxscore(raw, game_id, target_date.date())
+        if mapped.empty:
+            return None, "box score missing required player data."
+
+        return mapped, None
+
+    max_attempts = max(retries, 1)
+    attempt = 1
+    while pending and attempt <= max_attempts:
+        workers = max(1, min(max_workers, len(pending)))
+        attempt_failures: list[str] = []
+
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            future_map = {
+                executor.submit(_fetch_once, game_id): game_id for game_id in pending
+            }
+            for future in as_completed(future_map):
+                game_id = future_map[future]
+                try:
+                    result = future.result()
+                except RequestException as exc:
+                    failure_messages[game_id] = str(exc)
+                    attempt_failures.append(game_id)
+                    continue
+                except Exception as exc:  # pragma: no cover - defensive logging
+                    failure_messages[game_id] = f"unexpected error {exc}"
+                    attempt_failures.append(game_id)
+                    continue
+
+                mapped: pd.DataFrame | None
+                warning: str | None
+                if isinstance(result, tuple) and len(result) == 2:
+                    mapped, warning = result
+                else:
+                    mapped, warning = result, None
+
+                if warning:
+                    failure_messages[game_id] = warning
+                    attempt_failures.append(game_id)
+                    continue
+
+                if mapped is None or mapped.empty:
+                    failure_messages[game_id] = "box score payload not available yet."
+                    attempt_failures.append(game_id)
+                    continue
+
+                frames.append(mapped)
+                failure_messages.pop(game_id, None)
+
+        pending = attempt_failures
+        if pending and attempt < max_attempts:
+            sleep_seconds = min(5 * attempt, 15)
+            print(
+                f"Retrying {len(pending)} unfinished box score(s) in {sleep_seconds}s..."
+            )
+            time.sleep(sleep_seconds)
+
+        attempt += 1
+
+    for game_id in pending:
+        reason = failure_messages.get(game_id, "box score payload not available yet.")
+        print(f"Skipping {game_id}: {reason}")
+
+                frames.append(mapped)
+                failure_messages.pop(game_id, None)
+
+        pending = attempt_failures
+        if pending and attempt < max_attempts:
+            sleep_seconds = min(5 * attempt, 15)
+            print(
+                f"Retrying {len(pending)} unfinished box score(s) in {sleep_seconds}s..."
+            )
+            time.sleep(sleep_seconds)
+
+        attempt += 1
+
+    for game_id in pending:
+        reason = failure_messages.get(game_id, "box score payload not available yet.")
+        print(f"Skipping {game_id}: {reason}")
+
+            frames.append(mapped)
+
+    combined = _collect_boxscores(game_ids, target_date, retries=retries, timeout=timeout)
+    if combined.empty:
+        print("No player stats returned; nothing to load.")
         return pd.DataFrame()
 
     return pd.concat(frames, ignore_index=True)
