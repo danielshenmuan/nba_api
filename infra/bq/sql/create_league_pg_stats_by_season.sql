@@ -13,7 +13,7 @@ season_bounds AS (
 ),
 season_games AS (
   SELECT
-    d.player_id, d.game_date, d.minutes,
+    d.player_id, d.game_date, d.min,
     d.pts, d.reb, d.ast, d.stl, d.blk, d.fg3m, d.fg_pct, d.ft_pct, d.turnovers,
     h.fg_attempts AS fga, h.ft_attempts AS fta
   FROM `fantasy-survivor-app.nba_data.player_daily_game_stats_p` d
@@ -21,7 +21,7 @@ season_games AS (
     USING (player_id, game_date)
   JOIN season_bounds sb
     ON d.game_date BETWEEN sb.start_date AND sb.end_date
-  WHERE d.minutes > 0
+  WHERE d.min > 0
 ),
 per_player_pg AS (
   SELECT
@@ -29,8 +29,8 @@ per_player_pg AS (
     AVG(pts)  AS pts,  AVG(reb) AS reb, AVG(ast) AS ast, AVG(stl) AS stl, AVG(blk) AS blk,
     AVG(fg3m) AS fg3m, AVG(fg_pct) AS fg_pct, AVG(ft_pct) AS ft_pct, AVG(turnovers) AS turnovers,
     AVG(COALESCE(fga,0)) AS fga, AVG(COALESCE(fta,0)) AS fta,
-    AVG(minutes) AS minutes,
-    SAFE_DIVIDE(AVG(COALESCE(fga,0)) + AVG(COALESCE(fta,0)), NULLIF(AVG(minutes),0)) AS usage_per_min
+    AVG(min) AS minutes,
+    SAFE_DIVIDE(AVG(COALESCE(fga,0)) + AVG(COALESCE(fta,0)), NULLIF(AVG(min),0)) AS usage_per_min
   FROM season_games
   GROUP BY player_id
 ),
