@@ -195,7 +195,11 @@ def collect_boxscores(
         )
         print(f"Skipping {game_id}: {reason}")
 
-    if not frames:
+            frames.append(mapped)
+
+    combined = _collect_boxscores(game_ids, target_date, retries=retries, timeout=timeout)
+    if combined.empty:
+        print("No player stats returned; nothing to load.")
         return pd.DataFrame()
 
     return pd.concat(frames, ignore_index=True)
