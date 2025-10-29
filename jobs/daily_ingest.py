@@ -9,14 +9,18 @@ from typing import Iterable, List
 import numpy as np
 import pandas as pd
 from google.cloud import bigquery
-from nba_api.stats.endpoints import BoxScoreTraditionalV3, LeagueGameLog, ScoreboardV2
 from requests.exceptions import RequestException
+
+try:  # pragma: no cover - runtime packaging can flatten the jobs directory
+    from jobs import boxscore_v3_utils as box_utils
+except ModuleNotFoundError:  # pragma: no cover - fallback when running from jobs/
+    import boxscore_v3_utils as box_utils  # type: ignore
 
 DEFAULT_PROJECT = "fantasy-survivor-app"
 PARTITIONED_TABLE = "fantasy-survivor-app.nba_data.player_daily_game_stats_p"
 MIRROR_TABLE = "fantasy-survivor-app.nba_data.player_daily_game_stats"
 
-DEFAULT_TIMEOUT = 10
+DEFAULT_TIMEOUT = box_utils.DEFAULT_TIMEOUT
 DEFAULT_RETRIES = 0
 
 DEFAULT_MEAN = [12.44, 4.71, 2.81, 0.90, 0.60, 1.40, 0.46, 0.77, 1.46]
@@ -119,85 +123,18 @@ def _season_from_date(day: date) -> str:
     return f"{year - 1}-{year % 100:02d}"
 
 
-def _normalize_game_id(raw_value) -> str | None:
-    if raw_value is None or (isinstance(raw_value, float) and np.isnan(raw_value)):
-        return None
-    gid_str = str(raw_value).strip()
-    if not gid_str:
-        return None
-    if "." in gid_str:
-        try:
-            gid_str = f"{int(float(gid_str)):010d}"
-        except (TypeError, ValueError):
-            return None
-    elif gid_str.isdigit() and len(gid_str) < 10:
-        gid_str = gid_str.zfill(10)
-    return gid_str
-
-
 def discover_game_ids(
     target_date: datetime,
     *,
     timeout: int = DEFAULT_TIMEOUT,
     retries: int = DEFAULT_RETRIES,
 ) -> list[str]:
-    formatted = target_date.strftime("%m/%d/%Y")
-    errors: list[Exception] = []
-
-    for attempt in range(retries + 1):
-        try:
-            board = ScoreboardV2(
-                game_date=formatted,
-                day_offset=0,
-                league_id="00",
-                timeout=timeout,
-            )
-            frames = board.get_data_frames()
-        except Exception as exc:  # noqa: BLE001
-            errors.append(exc)
-        else:
-            if frames:
-                header = frames[0]
-                if "GAME_ID" in header.columns:
-                    game_ids = {
-                        _normalize_game_id(value)
-                        for value in header["GAME_ID"].dropna().tolist()
-                    }
-                    game_ids.discard(None)
-                    if game_ids:
-                        return sorted(game_ids)
-        if attempt < retries:
-            continue
-
-    season = _season_from_date(target_date.date())
-    try:
-        log = LeagueGameLog(
-            counter=0,
-            date_from_nullable=formatted,
-            date_to_nullable=formatted,
-            league_id="00",
-            player_or_team_abbreviation="P",
-            season=season,
-            season_type_all_star="Regular Season",
-            timeout=timeout,
-        )
-        frames = log.get_data_frames()
-        if frames:
-            frame = frames[0]
-            if "GAME_ID" in frame.columns:
-                game_ids = {
-                    _normalize_game_id(value)
-                    for value in frame["GAME_ID"].dropna().unique().tolist()
-                }
-                game_ids.discard(None)
-                if game_ids:
-                    return sorted(game_ids)
-    except Exception as exc:  # noqa: BLE001
-        errors.append(exc)
-
-    if errors:
-        raise RequestException(f"Failed to discover games for {formatted}: {errors[-1]}")
-    return []
+    helper_retries = max(1, retries + 1)
+    return box_utils.discover_game_ids(
+        target_date,
+        retries=helper_retries,
+        timeout=timeout,
+    )
 
 
 def _minutes_to_float(value) -> float:
@@ -232,24 +169,6 @@ def _minutes_to_float(value) -> float:
         return 0.0
 
 
-def load_traditional_boxscore(game_id: str, *, timeout: int = DEFAULT_TIMEOUT) -> pd.DataFrame:
-    try:
-        box = BoxScoreTraditionalV3(game_id=game_id, timeout=timeout)
-        frames = box.get_data_frames()
-    except Exception as exc:  # noqa: BLE001
-        raise RequestException(
-            f"Failed to load BoxScoreTraditionalV3 for {game_id}: {exc}"
-        ) from exc
-
-    if not frames:
-        return pd.DataFrame()
-
-    frame = frames[0]
-    if frame is None or frame.empty:
-        return pd.DataFrame()
-    return frame.copy()
-
-
 def collect_boxscores(
     game_ids: Iterable[str],
     target_date: datetime,
@@ -258,27 +177,26 @@ def collect_boxscores(
     retries: int = DEFAULT_RETRIES,
 ) -> pd.DataFrame:
     frames: list[pd.DataFrame] = []
+    attempts = max(1, retries + 1)
     for game_id in game_ids:
-        last_error: Exception | None = None
-        for _ in range(retries + 1):
-            try:
-                frame = load_traditional_boxscore(game_id, timeout=timeout)
-            except RequestException as exc:
-                last_error = exc
-                frame = pd.DataFrame()
-            if not frame.empty:
-                frame = frame.copy()
-                frame["gameId"] = frame.get("gameId", game_id)
-                frame["game_date"] = target_date.date()
-                frames.append(frame)
-                break
-        else:
-            message = str(last_error) if last_error else "box score payload not available"
-            print(f"Skipping {game_id}: {message}")
-
-        if mapped.empty:
-            print(f"Skipping {game_id}: box score missing required player data.")
+        try:
+            frame = box_utils.load_traditional_boxscore(
+                game_id,
+                retries=attempts,
+                timeout=timeout,
+            )
+        except RequestException as exc:
+            print(f"Skipping {game_id}: {exc}")
             continue
+
+        if frame.empty:
+            print(f"Skipping {game_id}: box score payload not available")
+            continue
+
+        cleaned = frame.copy()
+        cleaned["gameId"] = cleaned.get("gameId", game_id)
+        cleaned["game_date"] = target_date.date()
+        frames.append(cleaned)
 
         frames.append(mapped)
 
