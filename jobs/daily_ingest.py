@@ -175,8 +175,8 @@ def discover_game_ids(
             counter=0,
             date_from_nullable=formatted,
             date_to_nullable=formatted,
-            league_id_nullable="00",
-            player_or_team="P",
+            league_id="00",
+            player_or_team_abbreviation="P",
             season=season,
             season_type_all_star="Regular Season",
             timeout=timeout,
@@ -275,12 +275,6 @@ def collect_boxscores(
         else:
             message = str(last_error) if last_error else "box score payload not available"
             print(f"Skipping {game_id}: {message}")
-
-        try:
-            mapped = map_traditional_boxscore(raw, game_id, target_date.date())
-        except Exception as exc:  # pragma: no cover - defensive logging
-            print(f"Skipping {game_id}: failed to map box score ({exc}).")
-            continue
 
         if mapped.empty:
             print(f"Skipping {game_id}: box score missing required player data.")
