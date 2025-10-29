@@ -1,176 +1,280 @@
-"""Ingest NBA box scores into player_daily_game_stats_p."""
+"""Daily ingestion of NBA player box scores into BigQuery."""
 from __future__ import annotations
 
-import importlib
-import sys
-from datetime import date, datetime, timedelta, timezone
-from pathlib import Path
+import argparse
+import re
+from datetime import date, datetime, timedelta
+from typing import Iterable, List
 
 import numpy as np
 import pandas as pd
 from google.cloud import bigquery
+from nba_api.stats.endpoints import BoxScoreTraditionalV3, LeagueGameLog, ScoreboardV2
 from requests.exceptions import RequestException
-from google.api_core.exceptions import NotFound
 
-CURRENT_DIR = Path(__file__).resolve().parent
-
-
-def _import_boxscore_utils():  # pragma: no cover - import helper for Cloud Run images
-    candidates = ("jobs.boxscore_v3_utils", "boxscore_v3_utils")
-    for name in candidates:
-        try:
-            if name == "boxscore_v3_utils" and str(CURRENT_DIR) not in sys.path:
-                sys.path.insert(0, str(CURRENT_DIR))
-            return importlib.import_module(name)
-        except ModuleNotFoundError:
-            continue
-    raise ModuleNotFoundError(
-        "Unable to import boxscore_v3_utils. Ensure it is packaged with the job image."
-    )
-
-
-_boxscore_utils = _import_boxscore_utils()
-
-DEFAULT_RETRIES = _boxscore_utils.DEFAULT_RETRIES
-DEFAULT_TIMEOUT = _boxscore_utils.DEFAULT_TIMEOUT
-discover_game_ids = _boxscore_utils.discover_game_ids
-load_traditional_boxscore = _boxscore_utils.load_traditional_boxscore
-map_traditional_boxscore = _boxscore_utils.map_traditional_boxscore
-minutes_to_float = _boxscore_utils.minutes_to_float
-
-# ----------------------------
-# Baseline stats (update each season if needed)
-# ----------------------------
-WEIGHTED_MEAN = [11.69, 4.32, 2.76, 0.75, 0.50, 1.28, 0.47, 0.75, 1.33]
-WEIGHTED_STD = [7.23, 2.51, 2.09, 0.38, 0.45, 0.95, 0.082, 0.124, 0.85]
-
-DEFAULT_PROJECT_ID = "fantasy-survivor-app"
+DEFAULT_PROJECT = "fantasy-survivor-app"
 PARTITIONED_TABLE = "fantasy-survivor-app.nba_data.player_daily_game_stats_p"
 MIRROR_TABLE = "fantasy-survivor-app.nba_data.player_daily_game_stats"
-LEAGUE_STATS_TABLE = "fantasy-survivor-app.nba_data.league_pg_stats_by_season"
-LEAGUE_SQL_FILENAME = "create_league_pg_stats_by_season.sql"
-BQ_LOCATION = "northamerica-northeast1"
+
+DEFAULT_TIMEOUT = 10
+DEFAULT_RETRIES = 0
+
+DEFAULT_MEAN = [12.44, 4.71, 2.81, 0.90, 0.60, 1.40, 0.46, 0.77, 1.46]
+DEFAULT_STDEV = [6.44, 2.51, 2.08, 0.37, 0.41, 0.92, 0.075, 0.11, 0.90]
+FGA_NORM = 10.213
+FTA_NORM = 2.575
+NINE_CAT_ORDER = ["PTS", "REB", "AST", "STL", "BLK", "FG3M", "FG_PCT", "FT_PCT", "TO"]
+
+_MINUTES_PATTERN = re.compile(r"PT(?:(?P<minutes>\d+)M)?(?:(?P<seconds>\d+(?:\.\d+)?)S)?")
+
+INT_SOURCE_MAP = {
+    "fgm": "fieldGoalsMade",
+    "fga": "fieldGoalsAttempted",
+    "fg3m": "threePointersMade",
+    "fg3a": "threePointersAttempted",
+    "ftm": "freeThrowsMade",
+    "fta": "freeThrowsAttempted",
+    "pts": "points",
+    "reb": "reboundsTotal",
+    "ast": "assists",
+    "stl": "steals",
+    "blk": "blocks",
+    "turnovers": "turnovers",
+    "pf": "foulsPersonal",
+    "dreb": "reboundsDefensive",
+    "oreb": "reboundsOffensive",
+    "plus_minus": "plusMinusPoints",
+}
+
+FLOAT_SOURCE_MAP = {
+    "fg_pct": "fieldGoalsPercentage",
+    "fg3_pct": "threePointersPercentage",
+    "ft_pct": "freeThrowsPercentage",
+}
+
+ZSCORE_SOURCE_MAP = {
+    "PTS": "points",
+    "REB": "reboundsTotal",
+    "AST": "assists",
+    "STL": "steals",
+    "BLK": "blocks",
+    "FG3M": "threePointersMade",
+    "FG_PCT": "fieldGoalsPercentage",
+    "FT_PCT": "freeThrowsPercentage",
+    "TO": "turnovers",
+}
+
+STRING_SOURCE_MAP = {
+    "team_abbr": "teamTricode",
+    "team_city": "teamCity",
+    "team_name": "teamName",
+    "team_slug": "teamSlug",
+    "position": "position",
+    "comment": "comment",
+    "jersey_num": "jerseyNum",
+}
+
+BQ_COLUMNS = [
+    "game_date",
+    "game_id",
+    "player_id",
+    "player_name",
+    "team_id",
+    "team_abbr",
+    "team_city",
+    "team_name",
+    "team_slug",
+    "position",
+    "comment",
+    "jersey_num",
+    "minutes",
+    "fgm",
+    "fga",
+    "fg_pct",
+    "fg3m",
+    "fg3a",
+    "fg3_pct",
+    "ftm",
+    "fta",
+    "ft_pct",
+    "pts",
+    "reb",
+    "ast",
+    "stl",
+    "blk",
+    "turnovers",
+    "pf",
+    "dreb",
+    "oreb",
+    "plus_minus",
+    "z_score",
+    "season",
+]
 
 
-def _season_from_date(d: date) -> str:
-    year = d.year
-    if d.month >= 10:
+def _season_from_date(day: date) -> str:
+    year = day.year
+    if day.month >= 10:
         return f"{year}-{(year + 1) % 100:02d}"
     return f"{year - 1}-{year % 100:02d}"
 
 
-def compute_zscores(box: pd.DataFrame) -> pd.DataFrame:
-    box = box.copy()
-
-    def _min_to_int(value):
-        if pd.isna(value):
-            return None
-        if isinstance(value, str) and ":" in value:
-            try:
-                return int(float(value.split(":")[0]))
-            except ValueError:
-                return None
-        if isinstance(value, (int, float)):
-            return int(value)
+def _normalize_game_id(raw_value) -> str | None:
+    if raw_value is None or (isinstance(raw_value, float) and np.isnan(raw_value)):
         return None
-
-    box["MINUTES_INT"] = box["MINUTES"].apply(_min_to_int)
-
-    stat_columns = [
-        "PLAYER_NAME",
-        "PTS",
-        "REB",
-        "AST",
-        "STL",
-        "BLK",
-        "FG3M",
-        "FG_PCT",
-        "FT_PCT",
-        "TO",
-    ]
-    nine = box[stat_columns].fillna(0)
-
-    z_list: list[float] = []
-    for i in range(len(nine)):
-        vals = nine.iloc[i].tolist()[1:]
-        diff = np.subtract(vals, WEIGHTED_MEAN)
-        z = np.divide(diff, WEIGHTED_STD)
-        fga = box["FGA"].iloc[i] if pd.notnull(box["FGA"].iloc[i]) else 0
-        fta = box["FTA"].iloc[i] if pd.notnull(box["FTA"].iloc[i]) else 0
-        adj = np.multiply(z, [1, 1, 1, 1, 1, 1, (fga / 20.0), (fta / 8.0), -1])
-        z_list.append(round(float(np.sum(adj)), 3))
-
-    box["Z_SCORE"] = z_list
-    return box
+    gid_str = str(raw_value).strip()
+    if not gid_str:
+        return None
+    if "." in gid_str:
+        try:
+            gid_str = f"{int(float(gid_str)):010d}"
+        except (TypeError, ValueError):
+            return None
+    elif gid_str.isdigit() and len(gid_str) < 10:
+        gid_str = gid_str.zfill(10)
+    return gid_str
 
 
-def _locate_sql_file(filename: str) -> Path:
-    """Locate a SQL file bundled with the job or in the repo tree."""
-
-    search_paths: list[Path] = [CURRENT_DIR / "sql" / filename, CURRENT_DIR / filename]
-
-    for parent in CURRENT_DIR.parents:
-        search_paths.append(parent / "infra" / "bq" / "sql" / filename)
-
-    for candidate in search_paths:
-        if candidate.exists():
-            return candidate
-
-    raise FileNotFoundError(
-        f"Unable to locate {filename}. Ensure it is packaged with the deployment image."
-    )
-
-
-def collect_boxscores(
-    game_ids: list[str],
+def discover_game_ids(
     target_date: datetime,
     *,
     timeout: int = DEFAULT_TIMEOUT,
-) -> pd.DataFrame:
-    """Fetch and normalize box scores for ``game_ids`` sequentially."""
+    retries: int = DEFAULT_RETRIES,
+) -> list[str]:
+    formatted = target_date.strftime("%m/%d/%Y")
+    errors: list[Exception] = []
 
-    if not game_ids:
+    for attempt in range(retries + 1):
+        try:
+            board = ScoreboardV2(
+                game_date=formatted,
+                day_offset=0,
+                league_id="00",
+                timeout=timeout,
+            )
+            frames = board.get_data_frames()
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+        else:
+            if frames:
+                header = frames[0]
+                if "GAME_ID" in header.columns:
+                    game_ids = {
+                        _normalize_game_id(value)
+                        for value in header["GAME_ID"].dropna().tolist()
+                    }
+                    game_ids.discard(None)
+                    if game_ids:
+                        return sorted(game_ids)
+        if attempt < retries:
+            continue
+
+    season = _season_from_date(target_date.date())
+    try:
+        log = LeagueGameLog(
+            counter=0,
+            date_from_nullable=formatted,
+            date_to_nullable=formatted,
+            league_id_nullable="00",
+            player_or_team="P",
+            season=season,
+            season_type_all_star="Regular Season",
+            timeout=timeout,
+        )
+        frames = log.get_data_frames()
+        if frames:
+            frame = frames[0]
+            if "GAME_ID" in frame.columns:
+                game_ids = {
+                    _normalize_game_id(value)
+                    for value in frame["GAME_ID"].dropna().unique().tolist()
+                }
+                game_ids.discard(None)
+                if game_ids:
+                    return sorted(game_ids)
+    except Exception as exc:  # noqa: BLE001
+        errors.append(exc)
+
+    if errors:
+        raise RequestException(f"Failed to discover games for {formatted}: {errors[-1]}")
+    return []
+
+
+def _minutes_to_float(value) -> float:
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return 0.0
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return 0.0
+        if s.startswith("PT"):
+            match = _MINUTES_PATTERN.fullmatch(s)
+            if match:
+                minutes = int(match.group("minutes") or 0)
+                seconds = float(match.group("seconds") or 0)
+                return minutes + seconds / 60
+            return 0.0
+        if ":" in s:
+            mins, secs = s.split(":", 1)
+            try:
+                minutes = float(mins)
+                seconds = float(secs)
+                return minutes + seconds / 60
+            except ValueError:
+                return 0.0
+        try:
+            return float(s)
+        except ValueError:
+            return 0.0
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def load_traditional_boxscore(game_id: str, *, timeout: int = DEFAULT_TIMEOUT) -> pd.DataFrame:
+    try:
+        box = BoxScoreTraditionalV3(game_id=game_id, timeout=timeout)
+        frames = box.get_data_frames()
+    except Exception as exc:  # noqa: BLE001
+        raise RequestException(
+            f"Failed to load BoxScoreTraditionalV3 for {game_id}: {exc}"
+        ) from exc
+
+    if not frames:
         return pd.DataFrame()
 
+    frame = frames[0]
+    if frame is None or frame.empty:
+        return pd.DataFrame()
+    return frame.copy()
+
+
+def collect_boxscores(
+    game_ids: Iterable[str],
+    target_date: datetime,
+    *,
+    timeout: int = DEFAULT_TIMEOUT,
+    retries: int = DEFAULT_RETRIES,
+) -> pd.DataFrame:
     frames: list[pd.DataFrame] = []
-    seen: set[str] = set()
-    request_timeout = timeout or DEFAULT_TIMEOUT
-    per_game_retries = max(1, DEFAULT_RETRIES)
-
-    for raw_game_id in game_ids:
-        game_id = str(raw_game_id).strip()
-        if not game_id or game_id in seen:
-            continue
-        seen.add(game_id)
-
-        raw: pd.DataFrame | None = None
+    for game_id in game_ids:
         last_error: Exception | None = None
-
-        for attempt in range(per_game_retries):
+        for _ in range(retries + 1):
             try:
-                raw = load_traditional_boxscore(
-                    game_id,
-                    retries=1,
-                    timeout=request_timeout,
-                )
+                frame = load_traditional_boxscore(game_id, timeout=timeout)
             except RequestException as exc:
                 last_error = exc
-                raw = None
-            else:
-                if raw is None or raw.empty:
-                    last_error = None
-                else:
-                    break
-
-            if attempt + 1 < per_game_retries:
-                continue
-
-        if raw is None or (isinstance(raw, pd.DataFrame) and raw.empty):
-            if last_error is None:
-                print(f"Skipping {game_id}: box score not available yet.")
-            else:
-                print(f"Skipping {game_id}: {last_error}")
-            continue
+                frame = pd.DataFrame()
+            if not frame.empty:
+                frame = frame.copy()
+                frame["gameId"] = frame.get("gameId", game_id)
+                frame["game_date"] = target_date.date()
+                frames.append(frame)
+                break
+        else:
+            message = str(last_error) if last_error else "box score payload not available"
+            print(f"Skipping {game_id}: {message}")
 
         try:
             mapped = map_traditional_boxscore(raw, game_id, target_date.date())
@@ -250,341 +354,300 @@ def collect_boxscores(
     return pd.concat(frames, ignore_index=True)
 
 
-def build_bq_payload(frame: pd.DataFrame, season_value: str | None = None) -> pd.DataFrame:
-    """Shape a mapped + z-scored frame into the BigQuery schema."""
+def _compute_zscore_row(row_vals: List[float], fga: float, fta: float) -> float:
+    diff = np.subtract(row_vals, DEFAULT_MEAN)
+    stdev_array = np.array(DEFAULT_STDEV, dtype=float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        z_each = np.divide(diff, stdev_array, out=np.zeros_like(diff), where=stdev_array != 0)
 
-    if frame.empty:
-        return pd.DataFrame()
-
-    df = frame.copy()
-    df["PLAYER_ID"] = pd.to_numeric(df["PLAYER_ID"], errors="coerce")
-    df["GAME_ID_INT"] = pd.to_numeric(df["GAME_ID"], errors="coerce")
-    df["TEAM_ID_INT"] = pd.to_numeric(df["TEAM_ID"], errors="coerce")
-    df["MINUTES_FLOAT"] = df["MINUTES"].apply(minutes_to_float)
-    df["GAME_DATE"] = pd.to_datetime(df["GAME_DATE"]).dt.date
-
-    if season_value is not None:
-        df["season"] = season_value
-    else:
-        df["season"] = df["GAME_DATE"].apply(_season_from_date)
-
-    df = df[df["PLAYER_ID"].notna()]
-    df = df[df["GAME_ID_INT"].notna()]
-    df = df[df["MINUTES_FLOAT"].notna() & (df["MINUTES_FLOAT"] > 0)]
-
-    if df.empty:
-        return pd.DataFrame()
-
-    def _string_series(series: pd.Series) -> pd.Series:
-        return series.astype("string").replace({pd.NA: None}).astype(object)
-
-    int_map = {
-        "fgm": "FGM",
-        "fga": "FGA",
-        "fg3m": "FG3M",
-        "fg3a": "FG3A",
-        "ftm": "FTM",
-        "fta": "FTA",
-        "pts": "PTS",
-        "reb": "REB",
-        "ast": "AST",
-        "stl": "STL",
-        "blk": "BLK",
-        "turnovers": "TO",
-        "pf": "PF",
-        "dreb": "DREB",
-        "oreb": "OREB",
-        "plus_minus": "PLUS_MINUS",
-    }
-
-    float_map = {
-        "fg_pct": "FG_PCT",
-        "fg3_pct": "FG3_PCT",
-        "ft_pct": "FT_PCT",
-    }
-
-    shaped: dict[str, pd.Series] = {
-        "game_date": df["GAME_DATE"],
-        "game_id": df["GAME_ID_INT"].astype("Int64"),
-        "player_id": df["PLAYER_ID"].astype("Int64"),
-        "player_name": df["PLAYER_NAME"].astype(str),
-        "team_id": df["TEAM_ID_INT"].astype("Int64"),
-        "team_abbr": _string_series(df["TEAM_ABBREVIATION"]),
-        "team_city": _string_series(df["TEAM_CITY"]),
-        "team_name": _string_series(df["TEAM_NAME"]),
-        "team_slug": _string_series(df["TEAM_SLUG"]),
-        "position": _string_series(df["POSITION"]),
-        "comment": _string_series(df["COMMENT"]),
-        "jersey_num": _string_series(df["JERSEY_NUM"]),
-        "minutes": df["MINUTES_FLOAT"].astype(float),
-    }
-
-    for dest, src in int_map.items():
-        values = pd.to_numeric(df[src], errors="coerce")
-        shaped[dest] = values.round().astype("Int64")
-
-    for dest, src in float_map.items():
-        shaped[dest] = pd.to_numeric(df[src], errors="coerce").astype(float)
-
-    shaped["z_score"] = pd.to_numeric(df["Z_SCORE"], errors="coerce").astype(float)
-    shaped["season"] = df["season"].astype(str)
-
-    ordered_columns = [
-        "game_date",
-        "game_id",
-        "player_id",
-        "player_name",
-        "team_id",
-        "team_abbr",
-        "team_city",
-        "team_name",
-        "team_slug",
-        "position",
-        "comment",
-        "jersey_num",
-        "minutes",
-        "fgm",
-        "fga",
-        "fg_pct",
-        "fg3m",
-        "fg3a",
-        "fg3_pct",
-        "ftm",
-        "fta",
-        "ft_pct",
-        "pts",
-        "reb",
-        "ast",
-        "stl",
-        "blk",
-        "turnovers",
-        "pf",
-        "dreb",
-        "oreb",
-        "plus_minus",
-        "z_score",
-        "season",
-    ]
-
-    out = pd.DataFrame(shaped, columns=ordered_columns)
-    return out.reset_index(drop=True)
-
-
-def _rows_exist_for_date(
-    table_ref: str, day: date, *, client: bigquery.Client
-) -> bool:
-    query = f"SELECT COUNT(1) AS row_count FROM `{table_ref}` WHERE game_date = @target"
-    job_config = bigquery.QueryJobConfig(
-        query_parameters=[bigquery.ScalarQueryParameter("target", "DATE", day)]
+    weights = np.array(
+        [
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            (fga / FGA_NORM) if FGA_NORM else 1,
+            (fta / FTA_NORM) if FTA_NORM else 1,
+            -1,
+        ],
+        dtype=float,
     )
-    job = client.query(query, job_config=job_config, location=BQ_LOCATION)
-    result = list(job.result())
-    if not result:
-        return False
-    return result[0].get("row_count", 0) > 0
+    total = float(np.sum(z_each * weights))
+    return round(total, 2)
 
 
-def _league_stats_refreshed_today(client: bigquery.Client) -> bool:
-    try:
-        table = client.get_table(LEAGUE_STATS_TABLE)
-    except NotFound:
-        return False
+def compute_zscores(box_df: pd.DataFrame) -> pd.DataFrame:
+    if box_df.empty:
+        return box_df
 
-    modified = getattr(table, "modified", None)
-    if modified is None:
-        return False
+    df = box_df.copy()
 
-    if modified.tzinfo is None:
-        modified = modified.replace(tzinfo=timezone.utc)
+    first = df.get("firstName")
+    last = df.get("familyName")
+    if first is not None and last is not None:
+        df["PLAYER_NAME"] = (
+            first.fillna("").astype(str).str.strip()
+            + " "
+            + last.fillna("").astype(str).str.strip()
+        ).str.strip()
     else:
-        modified = modified.astimezone(timezone.utc)
+        df["PLAYER_NAME"] = df.get("PLAYER_NAME", pd.Series(["" for _ in range(len(df))]))
 
-    return modified.date() >= datetime.now(timezone.utc).date()
+    if "PLAYER_NAME" in df:
+        empty_mask = df["PLAYER_NAME"].fillna("").eq("")
+        if empty_mask.any():
+            if "playerName" in df:
+                df.loc[empty_mask, "PLAYER_NAME"] = (
+                    df.loc[empty_mask, "playerName"].fillna("").astype(str)
+                )
 
+    for target, source in ZSCORE_SOURCE_MAP.items():
+        df[target] = pd.to_numeric(df.get(source), errors="coerce").fillna(0.0)
 
-def run_ingestion(
-    target_date: datetime | None = None,
-    season: str | None = None,
-    *,
-    retries: int = DEFAULT_RETRIES,
-    timeout: int = DEFAULT_TIMEOUT,
-) -> pd.DataFrame:
-    if target_date is None:
-        target_date = datetime.today() - timedelta(days=1)
+    df["FGA"] = pd.to_numeric(df.get("fieldGoalsAttempted"), errors="coerce").fillna(0.0)
+    df["FTA"] = pd.to_numeric(df.get("freeThrowsAttempted"), errors="coerce").fillna(0.0)
 
-    season_value = season or _season_from_date(target_date.date())
+    z_scores: list[float] = []
+    for _, row in df.iterrows():
+        row_vals = [float(row.get(cat, 0.0)) for cat in NINE_CAT_ORDER]
+        fga = float(row.get("FGA", 0.0))
+        fta = float(row.get("FTA", 0.0))
+        z_scores.append(_compute_zscore_row(row_vals, fga=fga, fta=fta))
 
-    try:
-        game_ids = discover_game_ids(
-            target_date,
-            retries=retries,
-            timeout=timeout,
-        )
-    except RequestException as exc:
-        print(f"Failed to load ScoreboardV2 for {target_date.date()}: {exc}")
-        return pd.DataFrame()
-
-    if not game_ids:
-        print(f"No games found on {target_date.date()}.")
-        return pd.DataFrame()
-
-    combined = collect_boxscores(game_ids, target_date, timeout=timeout)
-    if combined.empty:
-        print("No player stats returned; nothing to load.")
-        return pd.DataFrame()
-
-    combined = compute_zscores(combined)
-    payload = build_bq_payload(combined, season_value)
-    return payload
+    df["z_score"] = z_scores
+    return df
 
 
-def refresh_league_pg_stats(
-    *, client: bigquery.Client | None = None, project_id: str = DEFAULT_PROJECT_ID
-) -> None:
-    bq_client = client or bigquery.Client(project=project_id)
-    sql_path = _locate_sql_file(LEAGUE_SQL_FILENAME)
-    job = bq_client.query(sql_path.read_text(), location=BQ_LOCATION)
-    job.result()
-    print("Refreshed league_pg_stats_by_season ✅")
+def _clean_string(value) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, float) and np.isnan(value):
+        return None
+    value_str = str(value).strip()
+    return value_str or None
+
+
+def build_bq_payload(box_df: pd.DataFrame, season: str) -> pd.DataFrame:
+    if box_df.empty:
+        return pd.DataFrame(columns=BQ_COLUMNS)
+
+    df = box_df.copy()
+
+    player_series = df.get("personId")
+    if player_series is None:
+        return pd.DataFrame(columns=BQ_COLUMNS)
+    df["player_id"] = pd.to_numeric(player_series, errors="coerce").astype("Int64")
+    df = df[df["player_id"].notna() & df["player_id"].ne(0)].copy()
+
+    game_series = df.get("gameId")
+    if game_series is None:
+        return pd.DataFrame(columns=BQ_COLUMNS)
+    df["game_id"] = pd.to_numeric(game_series, errors="coerce").astype("Int64")
+    df = df[df["game_id"].notna()].copy()
+
+    team_series = df.get("teamId")
+    if team_series is None:
+        return pd.DataFrame(columns=BQ_COLUMNS)
+    df["team_id"] = pd.to_numeric(team_series, errors="coerce").astype("Int64")
+
+    minutes_series = df.get("minutes")
+    if minutes_series is None:
+        df["minutes"] = 0.0
+    else:
+        df["minutes"] = minutes_series.apply(_minutes_to_float)
+    df = df[df["minutes"] > 0].copy()
+
+    for target, source in INT_SOURCE_MAP.items():
+        source_series = df.get(source)
+        if source_series is None:
+            df[target] = pd.Series([0] * len(df), dtype="Int64", index=df.index)
+        else:
+            df[target] = pd.to_numeric(source_series, errors="coerce").fillna(0).astype("Int64")
+
+    for target, source in FLOAT_SOURCE_MAP.items():
+        source_series = df.get(source)
+        if source_series is None:
+            df[target] = pd.Series([np.nan] * len(df), index=df.index, dtype=float)
+        else:
+            df[target] = pd.to_numeric(source_series, errors="coerce")
+
+    name_series = df.get("PLAYER_NAME")
+    if name_series is None:
+        name_series = pd.Series(["" for _ in range(len(df))], index=df.index)
+    df["player_name"] = name_series.apply(_clean_string)
+
+    for target, source in STRING_SOURCE_MAP.items():
+        source_series = df.get(source)
+        if source_series is None:
+            df[target] = pd.Series([None] * len(df), index=df.index)
+        else:
+            df[target] = source_series.apply(_clean_string)
+
+    df["game_date"] = pd.to_datetime(df.get("game_date")).dt.date
+    df["season"] = season
+    df["z_score"] = pd.to_numeric(df.get("z_score"), errors="coerce").fillna(0.0)
+
+    ordered = df[BQ_COLUMNS].copy()
+    return ordered.reset_index(drop=True)
 
 
 def load_into_bigquery_tables(
-    df: pd.DataFrame,
+    payload: pd.DataFrame,
     *,
-    client: bigquery.Client | None = None,
-    project_id: str = DEFAULT_PROJECT_ID,
+    client: bigquery.Client,
     partitioned_table: str = PARTITIONED_TABLE,
     mirror_table: str | None = MIRROR_TABLE,
-    delete_mirror_dates: bool = True,
 ) -> None:
-    """Append ``df`` into the partitioned table and optional mirror table."""
-
-    if df.empty:
-        print("No rows provided for BigQuery load.")
+    if payload.empty:
+        print("No rows to load into BigQuery.")
         return
 
-    bq_client = client or bigquery.Client(project=project_id)
-    load_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
-
-    def _align_to_schema(
-        frame: pd.DataFrame, table_ref: str
-    ) -> pd.DataFrame:
-        table_obj = bq_client.get_table(table_ref)
-        schema_columns = [field.name for field in table_obj.schema]
-        schema_set = set(schema_columns)
-
-        if "min" in schema_set:
-            raise ValueError(
-                "BigQuery table"
-                f" {table_obj.full_table_id} still contains a 'min' column."
-                " Rename it to 'minutes' so the ingestion payload aligns with the"
-                " updated schema."
-            )
-
-        if "minutes" not in schema_set:
-            raise ValueError(
-                "BigQuery table"
-                f" {table_obj.full_table_id} is missing the required 'minutes' column."
-                " Update the warehouse schema to use 'minutes' instead of 'min'."
-            )
-
-        aligned = frame.copy()
-        extra_cols = [col for col in aligned.columns if col not in schema_columns]
-        if extra_cols:
-            print(
-                "Dropping columns not present in"
-                f" {table_obj.full_table_id}: {sorted(extra_cols)}"
-            )
-            aligned = aligned.drop(columns=extra_cols)
-
-        for column in schema_columns:
-            if column not in aligned.columns:
-                aligned[column] = None
-
-        return aligned[schema_columns]
-
-    partition_frame = _align_to_schema(df, partitioned_table)
-    job = bq_client.load_table_from_dataframe(
-        partition_frame, partitioned_table, job_config=load_config
-    )
+    job_config = bigquery.LoadJobConfig(write_disposition=bigquery.WriteDisposition.WRITE_APPEND)
+    job = client.load_table_from_dataframe(payload, partitioned_table, job_config=job_config)
     job.result()
-    print(f"Loaded {len(df)} rows into {partitioned_table}.")
+    print(f"Loaded {len(payload)} rows into {partitioned_table}.")
 
-    if not mirror_table:
-        return
+    if mirror_table:
+        mirror_job = client.load_table_from_dataframe(payload, mirror_table, job_config=job_config)
+        mirror_job.result()
+        print(f"Loaded {len(payload)} rows into {mirror_table}.")
 
-    if delete_mirror_dates:
-        non_null_dates = [
-            pd.to_datetime(value).date()
-            for value in df["game_date"].dropna().unique().tolist()
-        ]
-        if non_null_dates:
-            delete_sql = f"DELETE FROM `{mirror_table}` WHERE game_date IN UNNEST(@dates)"
-            delete_job = bq_client.query(
-                delete_sql,
-                job_config=bigquery.QueryJobConfig(
-                    query_parameters=[
-                        bigquery.ArrayQueryParameter("dates", "DATE", non_null_dates)
-                    ]
-                ),
-            )
-            delete_job.result()
 
-    mirror_frame = _align_to_schema(df, mirror_table)
-    mirror_job = bq_client.load_table_from_dataframe(
-        mirror_frame, mirror_table, job_config=load_config
+def run_ingestion(
+    target_date: datetime,
+    *,
+    project_id: str = DEFAULT_PROJECT,
+    partitioned_table: str = PARTITIONED_TABLE,
+    mirror_table: str | None = MIRROR_TABLE,
+    skip_mirror: bool = False,
+    dry_run: bool = False,
+    game_ids: Iterable[str] | None = None,
+    season_override: str | None = None,
+    timeout: int = DEFAULT_TIMEOUT,
+    retries: int = DEFAULT_RETRIES,
+) -> pd.DataFrame:
+    season = season_override or _season_from_date(target_date.date())
+
+    if game_ids is None:
+        game_ids = discover_game_ids(target_date, timeout=timeout, retries=retries)
+
+    game_ids = [str(gid) for gid in game_ids]
+    if not game_ids:
+        print(f"No games found for {target_date.date()}.")
+        return pd.DataFrame(columns=BQ_COLUMNS)
+
+    combined = collect_boxscores(game_ids, target_date, timeout=timeout, retries=retries)
+    if combined.empty:
+        print("No box scores returned; nothing to ingest.")
+        return pd.DataFrame(columns=BQ_COLUMNS)
+
+    combined = compute_zscores(combined)
+    payload = build_bq_payload(combined, season)
+    if payload.empty:
+        print("No rows after filtering; nothing to ingest.")
+        return payload
+
+    if dry_run:
+        return payload
+
+    client = bigquery.Client(project=project_id)
+    load_into_bigquery_tables(
+        payload,
+        client=client,
+        partitioned_table=partitioned_table,
+        mirror_table=None if skip_mirror else mirror_table,
     )
-    mirror_job.result()
-    print(f"Loaded {len(df)} rows into {mirror_table}.")
+    return payload
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Ingest NBA player box scores for a specific date using BoxScoreTraditionalV3 "
+            "and load them into BigQuery."
+        )
+    )
+    parser.add_argument(
+        "--date",
+        type=lambda value: datetime.strptime(value, "%Y-%m-%d"),
+        default=datetime.utcnow() - timedelta(days=1),
+        help="Target date in YYYY-MM-DD format (defaults to yesterday).",
+    )
+    parser.add_argument(
+        "--project",
+        default=DEFAULT_PROJECT,
+        help="Google Cloud project for BigQuery operations.",
+    )
+    parser.add_argument(
+        "--table",
+        default=PARTITIONED_TABLE,
+        help="Fully-qualified BigQuery partitioned table to load (player_daily_game_stats_p).",
+    )
+    parser.add_argument(
+        "--mirror-table",
+        default=MIRROR_TABLE,
+        help="Optional non-partitioned table to mirror results (player_daily_game_stats).",
+    )
+    parser.add_argument(
+        "--skip-mirror",
+        action="store_true",
+        help="Skip loading into the non-partitioned mirror table.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Fetch and shape data without loading into BigQuery.",
+    )
+    parser.add_argument(
+        "--game-ids",
+        nargs="*",
+        help="Optional explicit list of GAME_ID values to ingest (skips discovery).",
+    )
+    parser.add_argument(
+        "--season",
+        default=None,
+        help="Optional season override (e.g. 2024-25).",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=DEFAULT_TIMEOUT,
+        help="Timeout in seconds for NBA Stats API requests.",
+    )
+    parser.add_argument(
+        "--retries",
+        type=int,
+        default=DEFAULT_RETRIES,
+        help="Number of additional retries for Scoreboard and box score requests.",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = _parse_args()
+    payload = run_ingestion(
+        args.date,
+        project_id=args.project,
+        partitioned_table=args.table,
+        mirror_table=args.mirror_table,
+        skip_mirror=args.skip_mirror,
+        dry_run=args.dry_run,
+        game_ids=args.game_ids,
+        season_override=args.season,
+        timeout=args.timeout,
+        retries=args.retries,
+    )
+
+    if payload.empty:
+        print("Ingestion completed with no rows.")
+    else:
+        print(f"Ingestion completed with {len(payload)} rows prepared.")
+        if args.dry_run:
+            with pd.option_context("display.max_rows", None, "display.max_columns", None):
+                print(payload)
 
 
 if __name__ == "__main__":
-    target_date = datetime.today() - timedelta(days=1)
-    client = bigquery.Client(project=DEFAULT_PROJECT_ID)
-    partition_date = target_date.date()
-
-    try:
-        rows_exist = _rows_exist_for_date(
-            PARTITIONED_TABLE, partition_date, client=client
-        )
-    except Exception as exc:  # pragma: no cover - defensive logging
-        print(
-            "Unable to determine if rows already exist for",
-            f"{partition_date}: {exc}. Proceeding with ingestion.",
-        )
-        rows_exist = False
-
-    df = pd.DataFrame()
-
-    if rows_exist:
-        print(
-            f"{PARTITIONED_TABLE} already has rows for {partition_date}; "
-            "skipping ingestion."
-        )
-    else:
-        df = run_ingestion(target_date)
-
-        if df.empty:
-            print("No rows to load.")
-        else:
-            load_into_bigquery_tables(
-                df,
-                client=client,
-                project_id=DEFAULT_PROJECT_ID,
-                partitioned_table=PARTITIONED_TABLE,
-                mirror_table=MIRROR_TABLE,
-            )
-
-    try:
-        already_refreshed = _league_stats_refreshed_today(client)
-    except Exception as exc:  # pragma: no cover - defensive logging
-        print(
-            "Unable to determine if league_pg_stats_by_season was refreshed today:",
-            f"{exc}. Running refresh.",
-        )
-        already_refreshed = False
-
-    if already_refreshed:
-        print("league_pg_stats_by_season already refreshed today; skipping refresh.")
-    else:
-        refresh_league_pg_stats(client=client)
+    main()
