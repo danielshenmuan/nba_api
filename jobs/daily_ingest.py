@@ -168,7 +168,37 @@ def collect_boxscores(
 
         frames.append(mapped)
 
-    if not frames:
+        try:
+            mapped = map_traditional_boxscore(raw, game_id, target_date.date())
+        except Exception as exc:  # pragma: no cover - defensive logging
+            print(f"Skipping {game_id}: failed to map box score ({exc}).")
+            continue
+
+        if mapped.empty:
+            print(f"Skipping {game_id}: box score missing required player data.")
+            continue
+
+        frames.append(mapped)
+
+        pending = attempt_failures
+        if pending and attempt < max_attempts:
+            sleep_seconds = min(5 * attempt, 15)
+            print(
+                f"Retrying {len(pending)} unfinished box score(s) in {sleep_seconds}s..."
+            )
+            time.sleep(sleep_seconds)
+
+        attempt += 1
+
+    for game_id in pending:
+        reason = failure_messages.get(game_id, "box score payload not available yet.")
+        print(f"Skipping {game_id}: {reason}")
+
+            frames.append(mapped)
+
+    combined = _collect_boxscores(game_ids, target_date, retries=retries, timeout=timeout)
+    if combined.empty:
+        print("No player stats returned; nothing to load.")
         return pd.DataFrame()
 
     return pd.concat(frames, ignore_index=True)
