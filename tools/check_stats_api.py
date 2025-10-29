@@ -6,6 +6,7 @@ import sys
 from argparse import ArgumentParser
 from datetime import date, datetime
 from pathlib import Path
+import time
 from typing import Iterable
 
 import pandas as pd
@@ -34,8 +35,9 @@ _ingest_module = _import_module("jobs.daily_ingest", "daily_ingest")
 DEFAULT_TIMEOUT = _box_utils.DEFAULT_TIMEOUT
 DEFAULT_RETRIES = _box_utils.DEFAULT_RETRIES
 discover_game_ids = _box_utils.discover_game_ids
+load_traditional_boxscore = _box_utils.load_traditional_boxscore
+map_traditional_boxscore = _box_utils.map_traditional_boxscore
 build_bq_payload = _ingest_module.build_bq_payload
-collect_boxscores = _ingest_module.collect_boxscores
 compute_zscores = _ingest_module.compute_zscores
 
 # Set this to a YYYY-MM-DD string to force a specific date without passing --date.
@@ -53,17 +55,34 @@ def _build_bq_frame(
     target_date: datetime,
     season_value: str,
     *,
+    retries: int = DEFAULT_RETRIES,
     timeout: int = DEFAULT_TIMEOUT,
 ) -> pd.DataFrame:
-    combined = collect_boxscores(
-        list(game_ids),
-        target_date,
-        timeout=timeout,
-    )
+    frames: list[pd.DataFrame] = []
 
-    if combined.empty:
+    for game_id in game_ids:
+        try:
+            raw_df = load_traditional_boxscore(game_id, retries=retries, timeout=timeout)
+        except RequestException as exc:
+            print(f"Skipping {game_id}: {exc}")
+            continue
+
+        if raw_df.empty:
+            print(f"Skipping {game_id}: box score payload not available yet.")
+            continue
+
+        mapped = map_traditional_boxscore(raw_df, game_id, target_date.date())
+        if mapped.empty:
+            print(f"Skipping {game_id}: box score missing required player data.")
+            continue
+
+        frames.append(mapped)
+        time.sleep(0.3)
+
+    if not frames:
         return pd.DataFrame()
 
+    combined = pd.concat(frames, ignore_index=True)
     combined = compute_zscores(combined)
     return build_bq_payload(combined, season_value)
 
@@ -113,9 +132,7 @@ def main() -> None:
     else:
         try:
             game_ids = discover_game_ids(
-                target_date,
-                retries=DEFAULT_RETRIES,
-                timeout=DEFAULT_TIMEOUT,
+                target_date, retries=DEFAULT_RETRIES, timeout=DEFAULT_TIMEOUT
             )
         except RequestException as exc:
             print(f"Failed to discover games for {target_date.date()}: {exc}")
