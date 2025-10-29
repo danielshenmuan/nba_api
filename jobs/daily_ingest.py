@@ -135,12 +135,55 @@ def collect_boxscores(
     frames: list[pd.DataFrame] = []
     seen: set[str] = set()
     request_timeout = timeout or DEFAULT_TIMEOUT
+    per_game_retries = max(1, DEFAULT_RETRIES)
 
     for raw_game_id in game_ids:
         game_id = str(raw_game_id).strip()
         if not game_id or game_id in seen:
             continue
         seen.add(game_id)
+
+        raw: pd.DataFrame | None = None
+        last_error: Exception | None = None
+        for attempt in range(per_game_retries):
+            try:
+                raw = load_traditional_boxscore(
+                    game_id,
+                    retries=1,
+                    timeout=request_timeout,
+                )
+            except RequestException as exc:
+                last_error = exc
+                continue
+
+            if raw is None or raw.empty:
+                last_error = None
+                raw = None
+                break
+
+            last_error = None
+            break
+
+        if raw is None or (isinstance(raw, pd.DataFrame) and raw.empty):
+            message = (
+                f"Skipping {game_id}: box score not available yet."
+                if last_error is None
+                else f"Skipping {game_id}: {last_error}"
+            )
+            print(message)
+            continue
+
+        try:
+            mapped = map_traditional_boxscore(raw, game_id, target_date.date())
+        except Exception as exc:  # pragma: no cover - defensive logging
+            print(f"Skipping {game_id}: failed to map box score ({exc}).")
+            continue
+
+        if mapped.empty:
+            print(f"Skipping {game_id}: box score missing required player data.")
+            continue
+
+        frames.append(mapped)
 
         try:
             raw = load_traditional_boxscore(
