@@ -116,7 +116,6 @@ def main() -> None:
                 target_date,
                 retries=DEFAULT_RETRIES,
                 timeout=DEFAULT_TIMEOUT,
-                include_non_final=False,
             )
         except RequestException as exc:
             print(f"Failed to discover games for {target_date.date()}: {exc}")

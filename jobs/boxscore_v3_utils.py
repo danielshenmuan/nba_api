@@ -18,7 +18,6 @@ _MINUTES_ISO_PATTERN = re.compile(
 
 DEFAULT_TIMEOUT = 10
 DEFAULT_RETRIES = 1
-_FINAL_STATUS_ID = "3"
 
 
 def _season_from_date(d: date) -> str:
@@ -35,7 +34,6 @@ def discover_game_ids(
     *,
     retries: int = DEFAULT_RETRIES,
     timeout: int = DEFAULT_TIMEOUT,
-    include_non_final: bool = False,
 ) -> list[str]:
     """Return game IDs for ``target_date`` using the ScoreboardV2 endpoint."""
 
@@ -74,30 +72,6 @@ def discover_game_ids(
                 gid_str = _normalize_game_id(row.get("GAME_ID"))
                 if not gid_str:
                     continue
-                if not include_non_final:
-                    status_raw = row.get("GAME_STATUS_ID")
-                    status_text = row.get("GAME_STATUS_TEXT")
-
-                    is_final = False
-                    if status_raw is not None:
-                        status_str = str(status_raw).strip()
-                        if status_str == _FINAL_STATUS_ID:
-                            is_final = True
-                        else:
-                            try:
-                                status_normalized = str(int(float(status_str)))
-                            except (TypeError, ValueError):
-                                status_normalized = ""
-                            if status_normalized == _FINAL_STATUS_ID:
-                                is_final = True
-
-                    if not is_final and status_text:
-                        if str(status_text).strip().lower() == "final":
-                            is_final = True
-
-                    if not is_final:
-                        continue
-
                 game_ids.add(gid_str)
             if game_ids:
                 return sorted(game_ids)
