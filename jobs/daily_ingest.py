@@ -145,6 +145,7 @@ def collect_boxscores(
 
         raw: pd.DataFrame | None = None
         last_error: Exception | None = None
+
         for attempt in range(per_game_retries):
             try:
                 raw = load_traditional_boxscore(
@@ -154,12 +155,34 @@ def collect_boxscores(
                 )
             except RequestException as exc:
                 last_error = exc
+                raw = None
+            else:
+                if raw is None or raw.empty:
+                    last_error = None
+                else:
+                    break
+
+            if attempt + 1 < per_game_retries:
                 continue
 
-            if raw is None or raw.empty:
-                last_error = None
-                raw = None
-                break
+        if raw is None or (isinstance(raw, pd.DataFrame) and raw.empty):
+            if last_error is None:
+                print(f"Skipping {game_id}: box score not available yet.")
+            else:
+                print(f"Skipping {game_id}: {last_error}")
+            continue
+
+        try:
+            mapped = map_traditional_boxscore(raw, game_id, target_date.date())
+        except Exception as exc:  # pragma: no cover - defensive logging
+            print(f"Skipping {game_id}: failed to map box score ({exc}).")
+            continue
+
+        if mapped.empty:
+            print(f"Skipping {game_id}: box score missing required player data.")
+            continue
+
+        frames.append(mapped)
 
             last_error = None
             break
