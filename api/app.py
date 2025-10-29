@@ -1,16 +1,11 @@
-from fastapi import FastAPI, Query, HTTPException, Request, APIRouter
+from fastapi import APIRouter, FastAPI, HTTPException, Query, Request
+from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from fastapi.encoders import jsonable_encoder
-from typing import List, Optional, Union
-from fastapi.responses import PlainTextResponse
-from pathlib import Path
-from datetime import date, timedelta, datetime
-from typing import List, Optional
+from datetime import date, datetime, timedelta
+from typing import Optional
 import math
 import re
-from fastapi.openapi.utils import get_openapi
-from fastapi.responses import PlainTextResponse
 
 from service.player_lookup import search_players
 from service.nba_fetch import get_daily_leaders, get_player_time_series
@@ -71,10 +66,7 @@ def daily_leaders(
     mode: str = Query(default="best", pattern=r"^(best|worst)$"),
     min_minutes: int = Query(default=20, ge=0),
 ):
-    try:
-        leaders = get_daily_leaders(game_date, limit, mode, min_minutes=min_minutes)
-    except TypeError:
-        leaders = get_daily_leaders(game_date, limit, mode)
+    leaders = get_daily_leaders(game_date, limit, mode, min_minutes=min_minutes)
 
     payload = {
         "date": str(game_date),
