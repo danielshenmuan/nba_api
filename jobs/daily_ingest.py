@@ -127,14 +127,14 @@ def collect_boxscores(
     *,
     timeout: int = DEFAULT_TIMEOUT,
 ) -> pd.DataFrame:
-    """Fetch and normalize box scores for ``game_ids``."""
+    """Fetch and normalize box scores for ``game_ids`` sequentially."""
 
     if not game_ids:
         return pd.DataFrame()
 
     frames: list[pd.DataFrame] = []
     seen: set[str] = set()
-    request_timeout = DEFAULT_TIMEOUT if not timeout else timeout
+    request_timeout = timeout or DEFAULT_TIMEOUT
 
     for raw_game_id in game_ids:
         game_id = str(raw_game_id).strip()
@@ -145,7 +145,7 @@ def collect_boxscores(
         try:
             raw = load_traditional_boxscore(
                 game_id,
-                retries=1,
+                retries=DEFAULT_RETRIES,
                 timeout=request_timeout,
             )
         except RequestException as exc:
@@ -167,26 +167,6 @@ def collect_boxscores(
             continue
 
         frames.append(mapped)
-
-        try:
-            mapped = map_traditional_boxscore(raw, game_id, target_date.date())
-        except Exception as exc:  # pragma: no cover - defensive logging
-            print(f"Skipping {game_id}: failed to map box score ({exc}).")
-            continue
-
-        if mapped.empty:
-            print(f"Skipping {game_id}: box score missing required player data.")
-            continue
-
-        frames.append(mapped)
-
-        pending = attempt_failures
-        if pending and attempt < max_attempts:
-            sleep_seconds = min(5 * attempt, 15)
-            print(
-                f"Retrying {len(pending)} unfinished box score(s) in {sleep_seconds}s..."
-            )
-            time.sleep(sleep_seconds)
 
         attempt += 1
 
