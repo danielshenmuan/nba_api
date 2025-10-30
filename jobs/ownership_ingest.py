@@ -5,6 +5,7 @@ from datetime import date
 import pandas as pd
 from google.cloud import bigquery
 from dotenv import dotenv_values
+from yfpy.exceptions import YahooFantasySportsDataNotFound
 from yfpy.query import YahooFantasySportsQuery
 import google.auth
 
@@ -98,72 +99,158 @@ def _yahoo_query():
 def _name_of(p) -> str | None:
     return (getattr(getattr(p, "name", None), "full", None) or getattr(p, "full_name", None))
 
-def _pct_value(po) -> float | None:
-    # Accept YFPY PercentOwned or wrapped forms; return float 0..100
-    if po is None:
+def _extract_percent_value(po_obj) -> float | None:
+    """
+    Accepts either a dict {'value': ...} or an object with .value or .get('value').
+    Returns float or None.
+    """
+    if po_obj is None:
         return None
-    # PercentOwned directly
-    if hasattr(po, "value"):
+    # dict-like
+    if isinstance(po_obj, dict):
+        val = po_obj.get("value")
+    else:
+        # object-like: try attribute, then mapping-style get
+        val = getattr(po_obj, "value", None)
+        if val is None and hasattr(po_obj, "get"):
+            try:
+                val = po_obj.get("value")
+            except Exception:
+                pass
+    try:
+        return float(val) if val is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _percent_owned_current(q: YahooFantasySportsQuery, player_key: str) -> float | None:
+    """
+    Uses Yahoo's 'current' week shortcut.
+    Avoids dict(res); pulls from attributes if needed.
+    """
+    try:
+        res = q.get_player_percent_owned_by_week(player_key, "current")
+    except YahooFantasySportsDataNotFound:
+        return None
+    if not res:
+        return None
+
+    # Try to get percent_owned from dict or attributes
+    if hasattr(res, "as_dict"):
         try:
-            return float(po.value)
-        except (TypeError, ValueError):
-            return None
-    # PlayerOwnership model with .percent_owned
-    if hasattr(po, "percent_owned") and hasattr(po.percent_owned, "value"):
-        try:
-            return float(po.percent_owned.value)
-        except (TypeError, ValueError):
-            return None
-    # plain number/string fallback
-    if isinstance(po, (int, float)):
-        return float(po)
-    if isinstance(po, str):
-        try:
-            return float(po.strip().replace("%", ""))
-        except ValueError:
-            return None
-    return None
+            d = res.as_dict()
+            return _extract_percent_value(d.get("percent_owned"))
+        except Exception:
+            pass
+
+    # attribute fallbacks
+    po = getattr(res, "percent_owned", None)
+    return _extract_percent_value(po)
+
+def _iter_player_pool(
+    q: YahooFantasySportsQuery,
+    statuses: list[str | None] | None = None,
+    batch_size: int = 25,
+):
+    """Yield Player models across rostered + available pools for the league."""
+
+    statuses = statuses or [None, "A", "FA", "W"]
+    seen_keys: set[str] = set()
+    league_key = q.get_league_key()
+
+    for status in statuses:
+        start = 0
+
+        while True:
+            clause_parts = []
+            if status:
+                clause_parts.append(f"status={status}")
+            clause_parts.append(f"start={start}")
+            clause_parts.append(f"count={batch_size}")
+            url = (
+                f"https://fantasysports.yahooapis.com/fantasy/v2/league/{league_key}/players;"
+                f"{';'.join(clause_parts)}"
+            )
+
+            try:
+                payload = q.query(url, ["league", "players"])
+            except YahooFantasySportsDataNotFound:
+                break
+
+            if not payload:
+                break
+
+            players = payload if isinstance(payload, list) else [payload]
+            batch_count = len(players)
+
+            for player in players:
+                pkey = getattr(player, "player_key", None)
+                if pkey and pkey in seen_keys:
+                    continue
+                if pkey:
+                    seen_keys.add(pkey)
+                yield player
+
+            if batch_count < batch_size:
+                break
+
+            start += batch_count
+
 
 def fetch_yahoo_roster_df(q: YahooFantasySportsQuery) -> pd.DataFrame:
     """
     Preferred: per-player universal PercentOwned via get_player_percent_owned_by_week(..., 'current').
     Fallback: league payload if needed.
     """
-    players = q.get_league_players()
+
+    players = list(_iter_player_pool(q))
     total = len(players)
-    print(f"[Yahoo] league roster fetched: {total} players")
+    print(f"[Yahoo] player pool fetched: {total} players")
 
     rows = []
     for i, p in enumerate(players, 1):
-        if i % 100 == 0 or i == total:
-            print(f"[Yahoo] processed {i}/{total} ({round(i*100/total,1)}%)")
+        if total and (i % 100 == 0 or i == total):
+            print(f"[Yahoo] processed {i}/{total} ({round(i * 100 / total, 1)}%)")
 
-        name = _name_of(p)
+        key = getattr(p, "player_key", None)
+        name = (getattr(p, "full_name", None) or _name_of(p) or "").strip()
         if not name:
             continue
 
+        # Attempt to use percent-owned provided in the player payload first
         val = None
-        # 1) universal percent-owned (weekly coverage, 'current')
-        try:
-            ply = q.get_player_percent_owned_by_week(p.player_key, "current")  # returns Player model
-            po = getattr(ply, "percent_owned", None)
-            val = _pct_value(po)
-        except Exception as e:
-            # keep val None and try fallbacks
-            pass
+        for candidate in (
+            getattr(p, "percent_owned", None),
+            getattr(getattr(p, "ownership", None), "percent_owned", None),
+            getattr(p, "percent_owned_value", None),
+        ):
+            val = _extract_percent_value(candidate)
+            if val is not None:
+                break
 
-        # 2) fallback to league payload if universal missing
-        if val is None:
-            league_po = getattr(p, "percent_owned", None) or getattr(getattr(p, "ownership", None), "percent_owned", None)
-            val = _pct_value(league_po)
+        # Fallback: universal percent-owned (weekly coverage, 'current')
+        if val is None and key:
+            val = _percent_owned_current(q, key)
 
-        rows.append({"player_name": name, "roster_pct": val})
+        rows.append({"player_key": key, "player_name": name, "roster_pct": val})
 
-    df = pd.DataFrame(rows, columns=["player_name", "roster_pct"]).dropna(subset=["player_name"])
-    if not df.empty:
-        df["name_lc"] = df["player_name"].str.strip().str.lower()
-        df = (df.sort_values(["name_lc", "roster_pct"], ascending=[True, False])
-                .drop_duplicates(subset=["name_lc"], keep="first"))
+    df = pd.DataFrame(rows).dropna(subset=["player_name"])
+    if "roster_pct" in df.columns:
+        df["roster_pct"] = pd.to_numeric(df["roster_pct"], errors="coerce")
+    if df.empty:
+        return df
+
+    if "player_key" in df.columns and df["player_key"].notna().any():
+        df = (
+            df.sort_values(["player_key", "roster_pct"], ascending=[True, False])
+            .drop_duplicates(subset=["player_key"], keep="first")
+        )
+
+    df["name_lc"] = df["player_name"].str.strip().str.lower()
+    df = (
+        df.sort_values(["name_lc", "roster_pct"], ascending=[True, False])
+        .drop_duplicates(subset=["name_lc"], keep="first")
+    )
     return df
 
 def run(snapshot: date | None = None) -> pd.DataFrame:
