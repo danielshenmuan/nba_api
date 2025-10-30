@@ -7,6 +7,7 @@ from google.cloud import bigquery
 from dotenv import dotenv_values
 from yfpy.exceptions import YahooFantasySportsDataNotFound
 from yfpy.query import YahooFantasySportsQuery
+from yfpy.exceptions import YahooFantasySportsDataNotFound
 import google.auth
 
 PROJECT = "fantasy-survivor-app"
