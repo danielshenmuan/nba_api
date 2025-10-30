@@ -5,6 +5,7 @@ from datetime import date
 import pandas as pd
 from google.cloud import bigquery
 from dotenv import dotenv_values
+from yfpy.exceptions import YahooFantasySportsDataNotFound
 from yfpy.query import YahooFantasySportsQuery
 import google.auth
 
@@ -124,19 +125,62 @@ def _pct_value(po) -> float | None:
             return None
     return None
 
+def _iter_player_pool(q: YahooFantasySportsQuery, statuses: list[str | None] | None = None):
+    """Yield Player models across rostered + available pools for the league."""
+
+    statuses = statuses or [None, "A", "FA", "W"]
+    seen_keys: set[str] = set()
+    batch_size = 25
+    league_key = q.get_league_key()
+
+    for status in statuses:
+        start = 0
+        status_clause = f"status={status};" if status else ""
+
+        while True:
+            try:
+                payload = q.query(
+                    f"https://fantasysports.yahooapis.com/fantasy/v2/league/{league_key}/players;{status_clause}",
+                    f"start={start};count={batch_size}",
+                    ["league", "players"],
+                )
+            except YahooFantasySportsDataNotFound:
+                break
+
+            if not payload:
+                break
+
+            players = payload if isinstance(payload, list) else [payload]
+            batch_count = len(players)
+
+            for player in players:
+                pkey = getattr(player, "player_key", None)
+                if pkey and pkey in seen_keys:
+                    continue
+                if pkey:
+                    seen_keys.add(pkey)
+                yield player
+
+            if batch_count < batch_size:
+                break
+
+            start += batch_count
+
+
 def fetch_yahoo_roster_df(q: YahooFantasySportsQuery) -> pd.DataFrame:
     """
     Preferred: per-player universal PercentOwned via get_player_percent_owned_by_week(..., 'current').
     Fallback: league payload if needed.
     """
-    players = q.get_league_players()
+
+    players = list(_iter_player_pool(q))
     total = len(players)
-    print(f"[Yahoo] league roster fetched: {total} players")
+    print(f"[Yahoo] player pool fetched: {total} players")
 
     rows = []
     for i, p in enumerate(players, 1):
-        if i % 100 == 0 or i == total:
-            print(f"[Yahoo] processed {i}/{total} ({round(i*100/total,1)}%)")
+        if total and (i % 100 == 0 or i == total):
+            print(f"[Yahoo] processed {i}/{total} ({round(i * 100 / total, 1)}%)")
 
         name = _name_of(p)
         if not name:
@@ -148,7 +192,7 @@ def fetch_yahoo_roster_df(q: YahooFantasySportsQuery) -> pd.DataFrame:
             ply = q.get_player_percent_owned_by_week(p.player_key, "current")  # returns Player model
             po = getattr(ply, "percent_owned", None)
             val = _pct_value(po)
-        except Exception as e:
+        except Exception:
             # keep val None and try fallbacks
             pass
 
@@ -162,8 +206,10 @@ def fetch_yahoo_roster_df(q: YahooFantasySportsQuery) -> pd.DataFrame:
     df = pd.DataFrame(rows, columns=["player_name", "roster_pct"]).dropna(subset=["player_name"])
     if not df.empty:
         df["name_lc"] = df["player_name"].str.strip().str.lower()
-        df = (df.sort_values(["name_lc", "roster_pct"], ascending=[True, False])
-                .drop_duplicates(subset=["name_lc"], keep="first"))
+        df = (
+            df.sort_values(["name_lc", "roster_pct"], ascending=[True, False])
+            .drop_duplicates(subset=["name_lc"], keep="first")
+        )
     return df
 
 def run(snapshot: date | None = None) -> pd.DataFrame:
