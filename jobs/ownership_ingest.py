@@ -101,158 +101,97 @@ def _name_of(p) -> str | None:
     return (getattr(getattr(p, "name", None), "full", None) or getattr(p, "full_name", None))
 
 def _extract_percent_value(po_obj) -> float | None:
-    """
-    Accepts either a dict {'value': ...} or an object with .value or .get('value').
-    Returns float or None.
-    """
+    """Return float percent from Yahoo payloads that expose a ``value`` field."""
+
     if po_obj is None:
         return None
-    # dict-like
+
+    val = None
     if isinstance(po_obj, dict):
         val = po_obj.get("value")
     else:
-        # object-like: try attribute, then mapping-style get
         val = getattr(po_obj, "value", None)
         if val is None and hasattr(po_obj, "get"):
             try:
                 val = po_obj.get("value")
             except Exception:
                 pass
+
     try:
         return float(val) if val is not None else None
     except (TypeError, ValueError):
         return None
 
+def _iter_player_pool(
+    q: YahooFantasySportsQuery,
+    statuses: list[str | None] | None = None,
+    batch_size: int = 25,
+):
+    """Yield Player models across rostered + available pools for the league."""
 
-def _percent_owned_current(q: YahooFantasySportsQuery, player_key: str) -> float | None:
-    """
-    Uses Yahoo's 'current' week shortcut.
-    Avoids dict(res); pulls from attributes if needed.
-    """
+    statuses = statuses or [None, "A", "FA", "W"]
+    seen_keys: set[str] = set()
+    league_key = q.get_league_key()
+
+    for status in statuses:
+        start = 0
+
+        while True:
+            clause_parts = []
+            if status:
+                clause_parts.append(f"status={status}")
+            clause_parts.append(f"start={start}")
+            clause_parts.append(f"count={batch_size}")
+            url = (
+                f"https://fantasysports.yahooapis.com/fantasy/v2/league/{league_key}/players;"
+                f"{';'.join(clause_parts)}"
+            )
+
+            try:
+                payload = q.query(url, ["league", "players"])
+            except YahooFantasySportsDataNotFound:
+                break
+
+            if not payload:
+                break
+
+            players = payload if isinstance(payload, list) else [payload]
+            batch_count = len(players)
+
+            for player in players:
+                pkey = getattr(player, "player_key", None)
+                if pkey and pkey in seen_keys:
+                    continue
+                if pkey:
+                    seen_keys.add(pkey)
+                yield player
+
+            if batch_count < batch_size:
+                break
+
+            start += batch_count
+
+
+def _percent_owned_value(q: YahooFantasySportsQuery, player_key: str) -> float | None:
     try:
         res = q.get_player_percent_owned_by_week(player_key, "current")
     except YahooFantasySportsDataNotFound:
         return None
-    if not res:
-        return None
 
-    # Try to get percent_owned from dict or attributes
+    po = None
     if hasattr(res, "as_dict"):
         try:
-            d = res.as_dict()
-            return _extract_percent_value(d.get("percent_owned"))
+            po = res.as_dict().get("percent_owned")
         except Exception:
-            pass
+            po = None
+    if po is None:
+        po = getattr(res, "percent_owned", None)
 
-    # attribute fallbacks
-    po = getattr(res, "percent_owned", None)
     return _extract_percent_value(po)
-
-def _iter_player_pool(
-    q: YahooFantasySportsQuery,
-    statuses: list[str | None] | None = None,
-    batch_size: int = 25,
-):
-    """Yield Player models across rostered + available pools for the league."""
-
-    statuses = statuses or [None, "A", "FA", "W"]
-    seen_keys: set[str] = set()
-    league_key = q.get_league_key()
-
-    for status in statuses:
-        start = 0
-
-        while True:
-            clause_parts = []
-            if status:
-                clause_parts.append(f"status={status}")
-            clause_parts.append(f"start={start}")
-            clause_parts.append(f"count={batch_size}")
-            url = (
-                f"https://fantasysports.yahooapis.com/fantasy/v2/league/{league_key}/players;"
-                f"{';'.join(clause_parts)}"
-            )
-
-            try:
-                payload = q.query(url, ["league", "players"])
-            except YahooFantasySportsDataNotFound:
-                break
-
-            if not payload:
-                break
-
-            players = payload if isinstance(payload, list) else [payload]
-            batch_count = len(players)
-
-            for player in players:
-                pkey = getattr(player, "player_key", None)
-                if pkey and pkey in seen_keys:
-                    continue
-                if pkey:
-                    seen_keys.add(pkey)
-                yield player
-
-            if batch_count < batch_size:
-                break
-
-            start += batch_count
-
-
-def _iter_player_pool(
-    q: YahooFantasySportsQuery,
-    statuses: list[str | None] | None = None,
-    batch_size: int = 25,
-):
-    """Yield Player models across rostered + available pools for the league."""
-
-    statuses = statuses or [None, "A", "FA", "W"]
-    seen_keys: set[str] = set()
-    league_key = q.get_league_key()
-
-    for status in statuses:
-        start = 0
-
-        while True:
-            clause_parts = []
-            if status:
-                clause_parts.append(f"status={status}")
-            clause_parts.append(f"start={start}")
-            clause_parts.append(f"count={batch_size}")
-            url = (
-                f"https://fantasysports.yahooapis.com/fantasy/v2/league/{league_key}/players;"
-                f"{';'.join(clause_parts)}"
-            )
-
-            try:
-                payload = q.query(url, ["league", "players"])
-            except YahooFantasySportsDataNotFound:
-                break
-
-            if not payload:
-                break
-
-            players = payload if isinstance(payload, list) else [payload]
-            batch_count = len(players)
-
-            for player in players:
-                pkey = getattr(player, "player_key", None)
-                if pkey and pkey in seen_keys:
-                    continue
-                if pkey:
-                    seen_keys.add(pkey)
-                yield player
-
-            if batch_count < batch_size:
-                break
-
-            start += batch_count
 
 
 def fetch_yahoo_roster_df(q: YahooFantasySportsQuery) -> pd.DataFrame:
-    """
-    Preferred: per-player universal PercentOwned via get_player_percent_owned_by_week(..., 'current').
-    Fallback: league payload if needed.
-    """
+    """Pull Yahoo player pool and source roster_pct directly from percent_owned.value."""
 
     players = list(_iter_player_pool(q))
     total = len(players)
@@ -268,20 +207,7 @@ def fetch_yahoo_roster_df(q: YahooFantasySportsQuery) -> pd.DataFrame:
         if not name:
             continue
 
-        # Attempt to use percent-owned provided in the player payload first
-        val = None
-        for candidate in (
-            getattr(p, "percent_owned", None),
-            getattr(getattr(p, "ownership", None), "percent_owned", None),
-            getattr(p, "percent_owned_value", None),
-        ):
-            val = _extract_percent_value(candidate)
-            if val is not None:
-                break
-
-        # Fallback: universal percent-owned (weekly coverage, 'current')
-        if val is None and key:
-            val = _percent_owned_current(q, key)
+        val = _percent_owned_value(q, key) if key else None
 
         rows.append({"player_key": key, "player_name": name, "roster_pct": val})
 
