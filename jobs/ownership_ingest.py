@@ -1,349 +1,211 @@
-"""Yahoo roster ownership ingestion job."""
-from __future__ import annotations
-
-import argparse
-import json
-import logging
+# jobs/ownership_ingest.py
 import os
-from dataclasses import dataclass
-from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
-
+from datetime import date
 import pandas as pd
 from google.cloud import bigquery
-from yfpy.models import Player
+from dotenv import dotenv_values
 from yfpy.query import YahooFantasySportsQuery
+import google.auth
 
-LOGGER = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s")
+PROJECT = "fantasy-survivor-app"
+DATASET = "nba_data"
+TABLE   = f"{PROJECT}.{DATASET}.player_ownership"
+BQ_LOCATION = "northamerica-northeast1"  # set to your dataset location
 
+# ---------- ENV (load root .env explicitly) ----------
+# ROOT_ENV = Path(__file__).resolve().parents[1] / ".env"
+# vals = dotenv_values(ROOT_ENV)
+# need = ["YAHOO_CONSUMER_KEY","YAHOO_CONSUMER_SECRET","YAHOO_ACCESS_TOKEN","YAHOO_ACCESS_TOKEN_SECRET","YAHOO_LEAGUE_ID"]
+# miss = [k for k in need if not vals.get(k)]
+# if miss:
+#     raise RuntimeError(f"Missing in {ROOT_ENV}: {miss}")
+# os.environ.update({k: v for k, v in vals.items() if v})
+#
+# GAME_ID = os.environ.get("YAHOO_GAME_ID")  # strongly recommended to avoid prompts
 
-@dataclass
-class OwnershipConfig:
-    project_id: str
-    dataset: str
-    partition_table: str
-    mirror_table: str
-    view_name: str
-    refresh_view: bool
-    snapshot_date: date
-    league_id: str
-    game_code: str
-    game_id: Optional[int]
-    dry_run: bool
-    delete_existing: bool
-    yahoo_consumer_key: str
-    yahoo_consumer_secret: str
-    yahoo_access_token: Dict[str, Any]
-
-    @property
-    def partition_table_id(self) -> str:
-        return f"{self.project_id}.{self.dataset}.{self.partition_table}"
-
-    @property
-    def mirror_table_id(self) -> str:
-        return f"{self.project_id}.{self.dataset}.{self.mirror_table}"
-
-    @property
-    def view_id(self) -> str:
-        return f"{self.project_id}.{self.dataset}.{self.view_name}"
-
-
-class OwnershipIngestError(RuntimeError):
-    """Raised when mandatory configuration or data is missing."""
-
-
-def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Ingest Yahoo roster ownership percentages into BigQuery")
-    parser.add_argument("--date", type=_parse_date, help="Snapshot date (YYYY-MM-DD). Defaults to today.")
-    parser.add_argument("--project", help="GCP project ID. Defaults to PROJECT_ID/GOOGLE_CLOUD_PROJECT env vars.")
-    parser.add_argument("--dataset", default=os.environ.get("OWNERSHIP_DATASET", "nba_data"), help="BigQuery dataset name")
-    parser.add_argument(
-        "--partition-table",
-        default=os.environ.get("OWNERSHIP_PARTITION_TABLE", "player_ownership_p"),
-        help="Partitioned BigQuery table name",
-    )
-    parser.add_argument(
-        "--mirror-table",
-        default=os.environ.get("OWNERSHIP_MIRROR_TABLE", "player_ownership"),
-        help="Non-partitioned BigQuery table name",
-    )
-    parser.add_argument(
-        "--view-name",
-        default=os.environ.get("OWNERSHIP_VIEW_NAME", "player_ownership_latest"),
-        help="View name to refresh after load",
-    )
-    parser.add_argument("--no-view-refresh", action="store_true", help="Skip recreating the latest ownership view")
-    parser.add_argument("--league-id", help="Yahoo Fantasy league ID (defaults to YAHOO_LEAGUE_ID env var)")
-    parser.add_argument("--game-code", default=os.environ.get("YAHOO_GAME_CODE", "nba"), help="Yahoo game code")
-    parser.add_argument("--game-id", type=int, help="Yahoo game id (optional override)")
-    parser.add_argument("--dry-run", action="store_true", help="Print the dataframe instead of loading BigQuery")
-    parser.add_argument(
-        "--skip-delete",
-        action="store_true",
-        help="Skip removing existing rows for the snapshot date before loading",
-    )
-    return parser.parse_args()
-
-
-def _parse_date(value: str) -> date:
-    return datetime.strptime(value, "%Y-%m-%d").date()
-
-
-def _env(name: str, default: Optional[str] = None) -> Optional[str]:
-    return os.environ.get(name, default)
-
-
-def _load_token_payload() -> Dict[str, Any]:
-    """Load Yahoo OAuth token details from environment variables or JSON."""
-
-    json_blob = _env("YAHOO_ACCESS_TOKEN_JSON")
-    token_file = _env("YAHOO_ACCESS_TOKEN_FILE")
-
-    if json_blob:
-        try:
-            payload = json.loads(json_blob)
-        except json.JSONDecodeError as exc:
-            raise OwnershipIngestError("Unable to parse YAHOO_ACCESS_TOKEN_JSON") from exc
-    elif token_file:
-        path = Path(token_file)
-        try:
-            payload = json.loads(path.read_text())
-        except FileNotFoundError as exc:
-            raise OwnershipIngestError(f"Yahoo token file not found: {path}") from exc
-        except json.JSONDecodeError as exc:
-            raise OwnershipIngestError(f"Unable to parse Yahoo token file: {path}") from exc
-    else:
-        payload = {
-            "consumer_key": _env("YAHOO_CONSUMER_KEY"),
-            "consumer_secret": _env("YAHOO_CONSUMER_SECRET"),
-            "access_token": _env("YAHOO_ACCESS_TOKEN"),
-            "refresh_token": _env("YAHOO_REFRESH_TOKEN"),
-            "token_type": _env("YAHOO_TOKEN_TYPE"),
-            "token_time": float(_env("YAHOO_TOKEN_TIME", "0") or 0.0),
-            "guid": _env("YAHOO_GUID"),
-        }
-
-    missing = [k for k in ("consumer_key", "consumer_secret", "refresh_token") if not payload.get(k)]
-    if missing:
-        raise OwnershipIngestError(
-            "Missing Yahoo OAuth credentials: " + ", ".join(missing) + ". Set YAHOO_ACCESS_TOKEN_JSON or individual vars."
-        )
-
-    # Normalise token_time to float if present
-    if "token_time" in payload:
-        try:
-            payload["token_time"] = float(payload["token_time"] or 0.0)
-        except (TypeError, ValueError):
-            payload["token_time"] = 0.0
-
-    return payload
-
-
-def _build_config(args: argparse.Namespace) -> OwnershipConfig:
-    snapshot_date = args.date or date.today()
-    league_id = args.league_id or _env("YAHOO_LEAGUE_ID")
-    if not league_id:
-        raise OwnershipIngestError("League ID is required via --league-id or YAHOO_LEAGUE_ID")
-
-    project_id = (
-        args.project
-        or _env("PROJECT_ID")
-        or _env("GOOGLE_CLOUD_PROJECT")
-        or _env("GCP_PROJECT")
-    )
-    if not project_id:
-        raise OwnershipIngestError("Project ID is required via --project or PROJECT_ID/GOOGLE_CLOUD_PROJECT env vars")
-
-    token_payload = _load_token_payload()
-    consumer_key = token_payload.get("consumer_key")
-    consumer_secret = token_payload.get("consumer_secret")
-
-    if not consumer_key or not consumer_secret:
-        raise OwnershipIngestError("Yahoo consumer key/secret missing from token payload")
-
-    return OwnershipConfig(
-        project_id=project_id,
-        dataset=args.dataset,
-        partition_table=args.partition_table,
-        mirror_table=args.mirror_table,
-        view_name=args.view_name,
-        refresh_view=not args.no_view_refresh,
-        snapshot_date=snapshot_date,
-        league_id=league_id,
-        game_code=args.game_code,
-        game_id=args.game_id,
-        dry_run=args.dry_run,
-        delete_existing=not args.skip_delete,
-        yahoo_consumer_key=consumer_key,
-        yahoo_consumer_secret=consumer_secret,
-        yahoo_access_token=token_payload,
-    )
-
-
-def _create_query(cfg: OwnershipConfig) -> YahooFantasySportsQuery:
-    LOGGER.info("Authenticating with Yahoo Fantasy Sports API for league %s", cfg.league_id)
-    return YahooFantasySportsQuery(
-        league_id=cfg.league_id,
-        game_code=cfg.game_code,
-        game_id=cfg.game_id,
-        yahoo_consumer_key=cfg.yahoo_consumer_key,
-        yahoo_consumer_secret=cfg.yahoo_consumer_secret,
-        yahoo_access_token_json=cfg.yahoo_access_token,
-        browser_callback=False,
-        env_var_fallback=False,
-        retries=3,
-        backoff=2,
-    )
-
-
-def _fetch_league_players(query: YahooFantasySportsQuery) -> List[Player]:
-    LOGGER.info("Retrieving league player metadata")
-    players = query.get_league_players()
-    LOGGER.info("Retrieved %d players", len(players))
-    return players
-
-
-def _player_rows(
-    players: Iterable[Player],
-    cfg: OwnershipConfig,
-    league_key: str,
-) -> pd.DataFrame:
-    snapshot_date = cfg.snapshot_date
-    ingested_at = datetime.utcnow()
-
-    rows: List[Dict[str, Any]] = []
-    for player in players:
-        percent_owned = None
-        percent_delta = None
-        coverage_type = None
-        coverage_week = None
-        if player.percent_owned:
-            percent_owned = float(player.percent_owned.value) if player.percent_owned.value is not None else None
-            percent_delta = (
-                float(player.percent_owned.delta)
-                if player.percent_owned.delta is not None
-                else None
-            )
-            coverage_type = player.percent_owned.coverage_type or None
-            coverage_week = player.percent_owned.week
-        eligibility = ",".join(sorted(filter(None, player.eligible_positions)))
-
-        rows.append(
-            {
-                "snapshot_date": snapshot_date,
-                "ingested_at": ingested_at,
-                "league_id": cfg.league_id,
-                "league_key": league_key,
-                "game_code": cfg.game_code,
-                "game_id": cfg.game_id,
-                "player_id": _safe_int(player.player_id),
-                "player_key": player.player_key or None,
-                "editorial_player_key": player.editorial_player_key or None,
-                "player_first_name": player.first_name or None,
-                "player_last_name": player.last_name or None,
-                "player_full_name": player.full_name or None,
-                "editorial_team_abbr": player.editorial_team_abbr or None,
-                "editorial_team_full_name": player.editorial_team_full_name or None,
-                "primary_position": player.primary_position or None,
-                "eligible_positions": eligibility or None,
-                "position_type": player.position_type or None,
-                "status": player.status or None,
-                "ownership_type": getattr(player.ownership, "ownership_type", None) or None,
-                "owner_team_key": getattr(player.ownership, "owner_team_key", None) or None,
-                "owner_team_name": getattr(player.ownership, "owner_team_name", None) or None,
-                "ownership_display_date": getattr(player.ownership, "display_date", None),
-                "ownership_waiver_date": getattr(player.ownership, "waiver_date", None) or None,
-                "percent_owned": percent_owned,
-                "percent_owned_delta": percent_delta,
-                "percent_owned_coverage_type": coverage_type,
-                "percent_owned_week": _safe_int(coverage_week),
-            }
-        )
-
-    frame = pd.DataFrame(rows)
-    if frame.empty:
-        return frame
-
-    frame["player_id"] = pd.to_numeric(frame["player_id"], errors="coerce").astype("Int64")
-    frame["percent_owned"] = pd.to_numeric(frame["percent_owned"], errors="coerce")
-    frame["percent_owned_delta"] = pd.to_numeric(frame["percent_owned_delta"], errors="coerce")
-    frame["percent_owned_week"] = pd.to_numeric(frame["percent_owned_week"], errors="coerce").astype("Int64")
-
-    return frame
-
-
-def _safe_int(value: Any) -> Optional[int]:
+ROOT_ENV = Path(__file__).resolve().parents[1] / ".env"
+if ROOT_ENV.exists():
     try:
-        return int(value) if value is not None else None
-    except (TypeError, ValueError):
-        return None
+        from dotenv import dotenv_values
+        os.environ.update({k: v for k, v in dotenv_values(ROOT_ENV).items() if v})
+        print(f"[env] loaded {ROOT_ENV}")
+    except Exception:
+        pass  # ignore if python-dotenv not installed in the image
 
+# Required in any environment (Cloud Run: provided via --set-env-vars)
+REQ = [
+    "YAHOO_CONSUMER_KEY",
+    "YAHOO_CONSUMER_SECRET",
+    "YAHOO_ACCESS_TOKEN",
+    "YAHOO_REFRESH_TOKEN",
+    # optional but nice to have:
+    # "YAHOO_TOKEN_TYPE", "YAHOO_TOKEN_EXPIRES_AT"
+]
+missing = [k for k in REQ if not os.getenv(k)]
+if missing:
+    raise SystemExit(f"Missing required env vars: {missing}")
 
-def _delete_existing_rows(client: bigquery.Client, table_id: str, snapshot: date) -> None:
-    sql = f"DELETE FROM `{table_id}` WHERE snapshot_date = @snapshot"
-    job_config = bigquery.QueryJobConfig(
-        query_parameters=[bigquery.ScalarQueryParameter("snapshot", "DATE", snapshot)]
+TMP_ENV = Path("/tmp/yahoo_tokens.env")
+lines = [
+    f"YAHOO_CONSUMER_KEY={os.environ['YAHOO_CONSUMER_KEY']}",
+    f"YAHOO_CONSUMER_SECRET={os.environ['YAHOO_CONSUMER_SECRET']}",
+    f"YAHOO_ACCESS_TOKEN={os.environ['YAHOO_ACCESS_TOKEN']}",
+    f"YAHOO_REFRESH_TOKEN={os.environ['YAHOO_REFRESH_TOKEN']}",
+    f"YAHOO_LEAGUE_ID={os.environ['YAHOO_LEAGUE_ID']}",
+    f"YAHOO_GAME_ID={os.getenv('YAHOO_GAME_ID','')}",
+]
+# optional extras if you have them
+if os.getenv("YAHOO_TOKEN_TYPE"):      lines.append(f"YAHOO_TOKEN_TYPE={os.environ['YAHOO_TOKEN_TYPE']}")
+# if os.getenv("YAHOO_TOKEN_EXPIRES_AT"): lines.append(f"YAHOO_TOKEN_EXPIRES_AT={os.environ['YAHOO_TOKEN_EXPIRES_AT']}")
+TMP_ENV.write_text("\n".join(lines))
+
+# ---------- Helpers ----------
+def _bq() -> bigquery.Client:
+    return bigquery.Client(project=PROJECT, location=BQ_LOCATION)
+
+def _player_dim_map(client: bigquery.Client) -> pd.DataFrame:
+    # latest season name->id from your fact table (may miss brand-new players)
+    sql = f"""
+    WITH latest AS (
+      SELECT season
+      FROM `{PROJECT}.{DATASET}.player_daily_game_stats_p`
+      WHERE season IS NOT NULL
+      ORDER BY season DESC
+      LIMIT 1
     )
-    client.query(sql, job_config=job_config).result()
-    LOGGER.info("Deleted existing rows from %s for %s", table_id, snapshot)
+    SELECT DISTINCT player_name, player_id
+    FROM `{PROJECT}.{DATASET}.player_daily_game_stats_p`
+    WHERE season = (SELECT season FROM latest)
+    """
+    df = client.query(sql, location=BQ_LOCATION).to_dataframe()
+    df["name_lc"] = df["player_name"].str.strip().str.lower()
+    return df[["name_lc", "player_id", "player_name"]]
 
+def _yahoo_query():
+    kwargs = dict(
+        league_id=os.environ["YAHOO_LEAGUE_ID"],
+        game_code="nba",
+        yahoo_consumer_key=os.environ["YAHOO_CONSUMER_KEY"],
+        yahoo_consumer_secret=os.environ["YAHOO_CONSUMER_SECRET"],
+        env_file_location=TMP_ENV,  # writable in Cloud Run
+    )
+    gid = os.getenv("YAHOO_GAME_ID")
+    if gid:
+        kwargs["game_id"] = int(gid)
+    return YahooFantasySportsQuery(**kwargs)
 
-def _load_dataframe(client: bigquery.Client, table_id: str, frame: pd.DataFrame) -> None:
-    job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
-    job = client.load_table_from_dataframe(frame, table_id, job_config=job_config)
+def _name_of(p) -> str | None:
+    return (getattr(getattr(p, "name", None), "full", None) or getattr(p, "full_name", None))
+
+def _pct_value(po) -> float | None:
+    # Accept YFPY PercentOwned or wrapped forms; return float 0..100
+    if po is None:
+        return None
+    # PercentOwned directly
+    if hasattr(po, "value"):
+        try:
+            return float(po.value)
+        except (TypeError, ValueError):
+            return None
+    # PlayerOwnership model with .percent_owned
+    if hasattr(po, "percent_owned") and hasattr(po.percent_owned, "value"):
+        try:
+            return float(po.percent_owned.value)
+        except (TypeError, ValueError):
+            return None
+    # plain number/string fallback
+    if isinstance(po, (int, float)):
+        return float(po)
+    if isinstance(po, str):
+        try:
+            return float(po.strip().replace("%", ""))
+        except ValueError:
+            return None
+    return None
+
+def fetch_yahoo_roster_df(q: YahooFantasySportsQuery) -> pd.DataFrame:
+    """
+    Preferred: per-player universal PercentOwned via get_player_percent_owned_by_week(..., 'current').
+    Fallback: league payload if needed.
+    """
+    players = q.get_league_players()
+    total = len(players)
+    print(f"[Yahoo] league roster fetched: {total} players")
+
+    rows = []
+    for i, p in enumerate(players, 1):
+        if i % 100 == 0 or i == total:
+            print(f"[Yahoo] processed {i}/{total} ({round(i*100/total,1)}%)")
+
+        name = _name_of(p)
+        if not name:
+            continue
+
+        val = None
+        # 1) universal percent-owned (weekly coverage, 'current')
+        try:
+            ply = q.get_player_percent_owned_by_week(p.player_key, "current")  # returns Player model
+            po = getattr(ply, "percent_owned", None)
+            val = _pct_value(po)
+        except Exception as e:
+            # keep val None and try fallbacks
+            pass
+
+        # 2) fallback to league payload if universal missing
+        if val is None:
+            league_po = getattr(p, "percent_owned", None) or getattr(getattr(p, "ownership", None), "percent_owned", None)
+            val = _pct_value(league_po)
+
+        rows.append({"player_name": name, "roster_pct": val})
+
+    df = pd.DataFrame(rows, columns=["player_name", "roster_pct"]).dropna(subset=["player_name"])
+    if not df.empty:
+        df["name_lc"] = df["player_name"].str.strip().str.lower()
+        df = (df.sort_values(["name_lc", "roster_pct"], ascending=[True, False])
+                .drop_duplicates(subset=["name_lc"], keep="first"))
+    return df
+
+def run(snapshot: date | None = None) -> pd.DataFrame:
+    snapshot = snapshot or date.today()
+    client = _bq()
+    q = _yahoo_query()
+
+    yahoo_df = fetch_yahoo_roster_df(q)
+    if yahoo_df.empty:
+        print("[Yahoo] no rows; aborting")
+        return yahoo_df
+
+    dim = _player_dim_map(client)
+    merged = yahoo_df.merge(dim, on="name_lc", how="left", suffixes=("_yahoo", "_dim")).drop(columns=["name_lc"])
+
+    # unify player_name
+    if "player_name_yahoo" in merged.columns and "player_name_dim" in merged.columns:
+        merged["player_name"] = merged["player_name_yahoo"].fillna(merged["player_name_dim"])
+        merged = merged.drop(columns=["player_name_yahoo", "player_name_dim"])
+    elif "player_name_yahoo" in merged.columns:
+        merged = merged.rename(columns={"player_name_yahoo": "player_name"})
+    elif "player_name_dim" in merged.columns:
+        merged = merged.rename(columns={"player_name_dim": "player_name"})
+    for col in ["player_name", "roster_pct", "player_id"]:
+        if col not in merged.columns:
+            merged[col] = None
+
+    merged.insert(0, "snapshot_date", pd.to_datetime(snapshot).date())
+
+    load_df = merged[["player_id", "player_name", "snapshot_date", "roster_pct"]]
+    print(f"[BQ] loading {len(load_df)} rows to {TABLE} …")
+    job = client.load_table_from_dataframe(
+        load_df,
+        TABLE,
+        job_config=bigquery.LoadJobConfig(write_disposition="WRITE_APPEND"),
+        location=BQ_LOCATION,
+    )
     job.result()
-    LOGGER.info("Loaded %d rows into %s", len(frame), table_id)
+    print(f"[BQ] done. {len(load_df)} rows → {TABLE} ({snapshot})")
+    return merged
 
-
-def _refresh_view(client: bigquery.Client, cfg: OwnershipConfig) -> None:
-    sql_path = Path(__file__).resolve().parent / "sql" / "create_player_ownership_latest.sql"
-    if not sql_path.exists():
-        raise OwnershipIngestError(f"View SQL not found at {sql_path}")
-
-    sql = sql_path.read_text()
-    sql = sql.replace("{{PROJECT_ID}}", cfg.project_id)
-    sql = sql.replace("{{DATASET}}", cfg.dataset)
-    sql = sql.replace("{{PARTITION_TABLE}}", cfg.partition_table)
-    sql = sql.replace("{{VIEW_NAME}}", cfg.view_name)
-
-    client.query(sql).result()
-    LOGGER.info("Refreshed view %s", cfg.view_id)
-
-
-def run() -> pd.DataFrame:
-    args = _parse_args()
-    cfg = _build_config(args)
-
-    query = _create_query(cfg)
-    league_key = query.get_league_key()
-    players = _fetch_league_players(query)
-    frame = _player_rows(players, cfg, league_key)
-
-    if frame.empty:
-        LOGGER.warning("No ownership rows retrieved for %s", cfg.snapshot_date)
-        return frame
-
-    if cfg.dry_run:
-        LOGGER.info("Dry run requested; returning dataframe without loading to BigQuery")
-        print(frame.head())
-        return frame
-
-    client = bigquery.Client(project=cfg.project_id)
-
-    if cfg.delete_existing:
-        _delete_existing_rows(client, cfg.partition_table_id, cfg.snapshot_date)
-        _delete_existing_rows(client, cfg.mirror_table_id, cfg.snapshot_date)
-
-    _load_dataframe(client, cfg.partition_table_id, frame)
-    _load_dataframe(client, cfg.mirror_table_id, frame)
-
-    if cfg.refresh_view:
-        _refresh_view(client, cfg)
-
-    return frame
-
+print("[AUTH] project:", google.auth.default()[1])
 
 if __name__ == "__main__":
     run()
