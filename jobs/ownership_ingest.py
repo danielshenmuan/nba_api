@@ -7,6 +7,7 @@ from google.cloud import bigquery
 from dotenv import dotenv_values
 from yfpy.exceptions import YahooFantasySportsDataNotFound
 from yfpy.query import YahooFantasySportsQuery
+from yfpy.exceptions import YahooFantasySportsDataNotFound
 import google.auth
 
 PROJECT = "fantasy-survivor-app"
@@ -146,6 +147,56 @@ def _percent_owned_current(q: YahooFantasySportsQuery, player_key: str) -> float
     # attribute fallbacks
     po = getattr(res, "percent_owned", None)
     return _extract_percent_value(po)
+
+def _iter_player_pool(
+    q: YahooFantasySportsQuery,
+    statuses: list[str | None] | None = None,
+    batch_size: int = 25,
+):
+    """Yield Player models across rostered + available pools for the league."""
+
+    statuses = statuses or [None, "A", "FA", "W"]
+    seen_keys: set[str] = set()
+    league_key = q.get_league_key()
+
+    for status in statuses:
+        start = 0
+
+        while True:
+            clause_parts = []
+            if status:
+                clause_parts.append(f"status={status}")
+            clause_parts.append(f"start={start}")
+            clause_parts.append(f"count={batch_size}")
+            url = (
+                f"https://fantasysports.yahooapis.com/fantasy/v2/league/{league_key}/players;"
+                f"{';'.join(clause_parts)}"
+            )
+
+            try:
+                payload = q.query(url, ["league", "players"])
+            except YahooFantasySportsDataNotFound:
+                break
+
+            if not payload:
+                break
+
+            players = payload if isinstance(payload, list) else [payload]
+            batch_count = len(players)
+
+            for player in players:
+                pkey = getattr(player, "player_key", None)
+                if pkey and pkey in seen_keys:
+                    continue
+                if pkey:
+                    seen_keys.add(pkey)
+                yield player
+
+            if batch_count < batch_size:
+                break
+
+            start += batch_count
+
 
 def _iter_player_pool(
     q: YahooFantasySportsQuery,
