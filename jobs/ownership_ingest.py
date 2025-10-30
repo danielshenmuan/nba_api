@@ -1,5 +1,6 @@
 # jobs/ownership_ingest.py
 import os
+import time
 from pathlib import Path
 from datetime import date
 import pandas as pd
@@ -9,11 +10,16 @@ from yfpy.exceptions import YahooFantasySportsDataNotFound
 from yfpy.query import YahooFantasySportsQuery
 from yfpy.exceptions import YahooFantasySportsDataNotFound
 import google.auth
+from requests.exceptions import HTTPError
 
 PROJECT = "fantasy-survivor-app"
 DATASET = "nba_data"
 TABLE   = f"{PROJECT}.{DATASET}.player_ownership"
 BQ_LOCATION = "northamerica-northeast1"  # set to your dataset location
+
+RATE_LIMIT_DELAY_SECONDS = float(os.getenv("YAHOO_API_DELAY_SECONDS", "0.5"))
+RATE_LIMIT_MAX_RETRIES = int(os.getenv("YAHOO_API_MAX_RETRIES", "3"))
+RATE_LIMIT_BACKOFF = float(os.getenv("YAHOO_API_BACKOFF", "2.0"))
 
 # ---------- ENV (load root .env explicitly) ----------
 # ROOT_ENV = Path(__file__).resolve().parents[1] / ".env"
@@ -122,6 +128,29 @@ def _extract_percent_value(po_obj) -> float | None:
     except (TypeError, ValueError):
         return None
 
+
+def _call_with_retries(fn, *args, **kwargs):
+    """Call Yahoo endpoints with basic retry/backoff to survive rate limiting."""
+
+    delay = RATE_LIMIT_DELAY_SECONDS
+    for attempt in range(1, RATE_LIMIT_MAX_RETRIES + 1):
+        try:
+            result = fn(*args, **kwargs)
+        except HTTPError as err:
+            if attempt == RATE_LIMIT_MAX_RETRIES:
+                raise
+
+            wait = delay * (RATE_LIMIT_BACKOFF ** (attempt - 1))
+            print(f"[Yahoo] rate limited ({err}); retrying in {wait:.2f}s (attempt {attempt}/{RATE_LIMIT_MAX_RETRIES})")
+            time.sleep(wait)
+            continue
+
+        if RATE_LIMIT_DELAY_SECONDS > 0:
+            time.sleep(RATE_LIMIT_DELAY_SECONDS)
+        return result
+
+    return None
+
 def _iter_player_pool(
     q: YahooFantasySportsQuery,
     statuses: list[str | None] | None = None,
@@ -148,7 +177,7 @@ def _iter_player_pool(
             )
 
             try:
-                payload = q.query(url, ["league", "players"])
+                payload = _call_with_retries(q.query, url, ["league", "players"])
             except YahooFantasySportsDataNotFound:
                 break
 
@@ -174,7 +203,7 @@ def _iter_player_pool(
 
 def _percent_owned_value(q: YahooFantasySportsQuery, player_key: str) -> float | None:
     try:
-        res = q.get_player_percent_owned_by_week(player_key, "current")
+        res = _call_with_retries(q.get_player_percent_owned_by_week, player_key, "current")
     except YahooFantasySportsDataNotFound:
         return None
 
