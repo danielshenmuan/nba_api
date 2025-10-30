@@ -135,15 +135,18 @@ def _iter_player_pool(q: YahooFantasySportsQuery, statuses: list[str | None] | N
 
     for status in statuses:
         start = 0
-        status_clause = f"status={status};" if status else ""
 
         while True:
+            clauses = [f"start={start}", f"count={batch_size}"]
+            if status:
+                clauses.append(f"status={status}")
+            url = (
+                f"https://fantasysports.yahooapis.com/fantasy/v2/league/{league_key}/players;"
+                + ";".join(clauses)
+            )
+
             try:
-                payload = q.query(
-                    f"https://fantasysports.yahooapis.com/fantasy/v2/league/{league_key}/players;{status_clause}",
-                    f"start={start};count={batch_size}",
-                    ["league", "players"],
-                )
+                payload = q.query(url, ["league", "players"])
             except YahooFantasySportsDataNotFound:
                 break
 
