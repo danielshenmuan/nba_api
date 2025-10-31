@@ -1,16 +1,16 @@
 # jobs/ownership_ingest.py
 import os
 import time
-from pathlib import Path
 from datetime import date
+from pathlib import Path
+
+import google.auth
 import pandas as pd
 from google.cloud import bigquery
-from dotenv import dotenv_values
-from yfpy.exceptions import YahooFantasySportsDataNotFound
-from yfpy.query import YahooFantasySportsQuery
-from yfpy.exceptions import YahooFantasySportsDataNotFound
-import google.auth
 from requests.exceptions import HTTPError
+from yfpy.exceptions import YahooFantasySportsDataNotFound
+from yfpy.models import Player
+from yfpy.query import YahooFantasySportsQuery
 
 PROJECT = "fantasy-survivor-app"
 DATASET = "nba_data"
@@ -20,6 +20,7 @@ BQ_LOCATION = "northamerica-northeast1"  # set to your dataset location
 RATE_LIMIT_DELAY_SECONDS = float(os.getenv("YAHOO_API_DELAY_SECONDS", "0.5"))
 RATE_LIMIT_MAX_RETRIES = int(os.getenv("YAHOO_API_MAX_RETRIES", "3"))
 RATE_LIMIT_BACKOFF = float(os.getenv("YAHOO_API_BACKOFF", "2.0"))
+PERCENT_OWNED_BATCH_SIZE = int(os.getenv("YAHOO_PERCENT_BATCH_SIZE", "25"))
 
 # ---------- ENV (load root .env explicitly) ----------
 # ROOT_ENV = Path(__file__).resolve().parents[1] / ".env"
@@ -155,12 +156,13 @@ def _iter_player_pool(
     q: YahooFantasySportsQuery,
     statuses: list[str | None] | None = None,
     batch_size: int = 25,
+    league_key: str | None = None,
 ):
     """Yield Player models across rostered + available pools for the league."""
 
     statuses = statuses or [None, "A", "FA", "W"]
     seen_keys: set[str] = set()
-    league_key = q.get_league_key()
+    league_key = league_key or q.get_league_key()
 
     for status in statuses:
         start = 0
@@ -177,7 +179,7 @@ def _iter_player_pool(
             )
 
             try:
-                payload = _call_with_retries(q.query, url, ["league", "players"])
+                payload = _call_with_retries(q.query, url, ["league", "players"], Player)
             except YahooFantasySportsDataNotFound:
                 break
 
@@ -201,30 +203,65 @@ def _iter_player_pool(
             start += batch_count
 
 
-def _percent_owned_value(q: YahooFantasySportsQuery, player_key: str) -> float | None:
+def _percent_owned_batch_values(
+    q: YahooFantasySportsQuery,
+    league_key: str,
+    player_keys: list[str],
+    week: str = "current",
+) -> dict[str, float | None]:
+    if not player_keys:
+        return {}
+
+    joined_keys = ",".join(player_keys)
+    url = (
+        f"https://fantasysports.yahooapis.com/fantasy/v2/league/{league_key}/players;"
+        f"player_keys={joined_keys}/percent_owned;type=week;week={week}"
+    )
+
     try:
-        res = _call_with_retries(q.get_player_percent_owned_by_week, player_key, "current")
+        payload = _call_with_retries(q.query, url, ["league", "players"], Player)
     except YahooFantasySportsDataNotFound:
-        return None
+        return {}
 
-    po = None
-    if hasattr(res, "as_dict"):
-        try:
-            po = res.as_dict().get("percent_owned")
-        except Exception:
-            po = None
-    if po is None:
-        po = getattr(res, "percent_owned", None)
+    if not payload:
+        return {}
 
-    return _extract_percent_value(po)
+    players = payload if isinstance(payload, list) else [payload]
+    results: dict[str, float | None] = {}
+    for player in players:
+        key = getattr(player, "player_key", None)
+        if not key:
+            continue
+        results[key] = _extract_percent_value(getattr(player, "percent_owned", None))
+
+    return results
 
 
 def fetch_yahoo_roster_df(q: YahooFantasySportsQuery) -> pd.DataFrame:
     """Pull Yahoo player pool and source roster_pct directly from percent_owned.value."""
 
-    players = list(_iter_player_pool(q))
+    league_key = q.get_league_key()
+    players = list(_iter_player_pool(q, league_key=league_key))
     total = len(players)
     print(f"[Yahoo] player pool fetched: {total} players")
+
+    keys = [getattr(p, "player_key", None) for p in players if getattr(p, "player_key", None)]
+    unique_keys: list[str] = []
+    seen_keys: set[str] = set()
+    for key in keys:
+        if key not in seen_keys:
+            seen_keys.add(key)
+            unique_keys.append(key)
+
+    percent_owned_map: dict[str, float | None] = {}
+    for start in range(0, len(unique_keys), PERCENT_OWNED_BATCH_SIZE):
+        batch = unique_keys[start : start + PERCENT_OWNED_BATCH_SIZE]
+        batch_map = _percent_owned_batch_values(q, league_key, batch)
+        percent_owned_map.update(batch_map)
+        if len(unique_keys) and ((start + len(batch)) % 100 == 0 or (start + len(batch)) == len(unique_keys)):
+            processed = start + len(batch)
+            pct = round(processed * 100 / len(unique_keys), 1)
+            print(f"[Yahoo] percent-owned fetched for {processed}/{len(unique_keys)} keys ({pct}%)")
 
     rows = []
     for i, p in enumerate(players, 1):
@@ -236,7 +273,7 @@ def fetch_yahoo_roster_df(q: YahooFantasySportsQuery) -> pd.DataFrame:
         if not name:
             continue
 
-        val = _percent_owned_value(q, key) if key else None
+        val = percent_owned_map.get(key) if key else None
 
         rows.append({"player_key": key, "player_name": name, "roster_pct": val})
 
