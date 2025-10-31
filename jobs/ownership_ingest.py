@@ -130,6 +130,52 @@ def _extract_percent_value(po_obj) -> float | None:
         return None
 
 
+def _normalize_player_payload(item):
+    """Coerce Yahoo player payload wrappers to the raw dict Player expects."""
+
+    if item is None:
+        return None
+
+    # Objects coming from yfpy responses sometimes expose a ``player`` attr.
+    if hasattr(item, "player") and getattr(item, "player") is not None:
+        item = getattr(item, "player")
+
+    # Dict wrapper: {"player": {...}}
+    if isinstance(item, dict) and "player" in item:
+        item = item["player"]
+
+    # Lists can look like ["player", {...}] or [{...}]
+    if isinstance(item, list):
+        if len(item) == 2 and isinstance(item[1], dict):
+            item = item[1]
+        elif item and isinstance(item[0], dict):
+            item = item[0]
+
+    return item
+
+
+def _player_from_payload(item) -> Player | None:
+    """Return a Player instance from a raw Yahoo payload item."""
+
+    normalized = _normalize_player_payload(item)
+    if normalized is None:
+        return None
+
+    if isinstance(normalized, Player):
+        return normalized
+
+    if hasattr(normalized, "as_dict"):
+        try:
+            normalized = normalized.as_dict()
+        except Exception:
+            return None
+
+    try:
+        return Player(normalized)
+    except Exception:
+        return None
+
+
 def _call_with_retries(fn, *args, **kwargs):
     """Call Yahoo endpoints with basic retry/backoff to survive rate limiting."""
 
@@ -179,7 +225,7 @@ def _iter_player_pool(
             )
 
             try:
-                payload = _call_with_retries(q.query, url, ["league", "players"], Player)
+                payload = _call_with_retries(q.query, url, ["league", "players"], None)
             except YahooFantasySportsDataNotFound:
                 break
 
@@ -189,7 +235,10 @@ def _iter_player_pool(
             players = payload if isinstance(payload, list) else [payload]
             batch_count = len(players)
 
-            for player in players:
+            for raw_player in players:
+                player = _player_from_payload(raw_player)
+                if player is None:
+                    continue
                 pkey = getattr(player, "player_key", None)
                 if pkey and pkey in seen_keys:
                     continue
@@ -219,7 +268,7 @@ def _percent_owned_batch_values(
     )
 
     try:
-        payload = _call_with_retries(q.query, url, ["league", "players"], Player)
+        payload = _call_with_retries(q.query, url, ["league", "players"], None)
     except YahooFantasySportsDataNotFound:
         return {}
 
@@ -228,7 +277,10 @@ def _percent_owned_batch_values(
 
     players = payload if isinstance(payload, list) else [payload]
     results: dict[str, float | None] = {}
-    for player in players:
+    for raw_player in players:
+        player = _player_from_payload(raw_player)
+        if player is None:
+            continue
         key = getattr(player, "player_key", None)
         if not key:
             continue
