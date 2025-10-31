@@ -10,6 +10,7 @@
 #   PROJECT_ID       (default: fantasy-survivor-app)
 #   REGION           (default: us-central1)
 #   JOB_NAME         (default: nba-daily-ingest)
+#   IMAGE_NAME       (default: $JOB_NAME)
 #   IMAGE_TAG        (default: timestamp)
 #   SERVICE_ACCOUNT  (if set, used when updating the job)
 #   EXECUTE_AFTER_DEPLOY (set to 1 to run the job immediately after updating)
@@ -22,6 +23,7 @@ BUILD_CONTEXT="${SCRIPT_DIR}"
 PROJECT_ID=${PROJECT_ID:-fantasy-survivor-app}
 REGION=${REGION:-us-central1}
 JOB_NAME=${JOB_NAME:-nba-daily-ingest}
+IMAGE_NAME=${IMAGE_NAME:-${JOB_NAME}}
 IMAGE_TAG=${IMAGE_TAG:-$(date +%Y%m%d%H%M%S)}
 
 if [[ -z "${IMAGE_REPO:-}" ]]; then
@@ -62,7 +64,17 @@ ensure_repo_exists() {
 
 ensure_repo_exists "${IMAGE_REPO}"
 
-IMAGE_URI="${IMAGE_REPO}/nba-daily-ingest:${IMAGE_TAG}"
+IMAGE_URI="${IMAGE_REPO}/${IMAGE_NAME}:${IMAGE_TAG}"
+
+if ! gcloud run jobs describe "${JOB_NAME}" \
+  --project "${PROJECT_ID}" \
+  --region "${REGION}" >/dev/null 2>&1; then
+  cat <<EOF >&2
+Cloud Run job "${JOB_NAME}" was not found in project ${PROJECT_ID} (${REGION}).
+Create the job manually first, then rerun this script to update its image.
+EOF
+  exit 1
+fi
 
 echo "Building container image ${IMAGE_URI}..."
 gcloud builds submit "${BUILD_CONTEXT}" \
