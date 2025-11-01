@@ -8,7 +8,11 @@ import math
 import re
 
 from service.player_lookup import search_players
-from service.nba_fetch import get_daily_leaders, get_player_time_series
+from service.nba_fetch import (
+    get_daily_leaders,
+    get_player_roster_pct,
+    get_player_time_series,
+)
 from service.player_baselines import get_player_baselines_v1
 app = FastAPI(openapi_url="/openapi.json", docs_url="/docs")
 
@@ -40,6 +44,21 @@ def _parse_date(s: str) -> date:
         return datetime.strptime(s, "%Y-%m-%d").date()
     except ValueError:
         raise HTTPException(status_code=400, detail=f"Invalid date '{s}'. Use YYYY-MM-DD.")
+
+
+def _parse_optional_int(value: Optional[str], field: str) -> Optional[int]:
+    if value is None:
+        return None
+    stripped = value.strip()
+    if not stripped:
+        return None
+    m = re.search(r"\d+", stripped)
+    if not m:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid {field} '{value}'. Must contain an integer.",
+        )
+    return int(m.group(0))
 
 # ----------------------------
 # unversioned health
@@ -142,6 +161,47 @@ def player_baselines_v1_endpoint(
         content=jsonable_encoder(sanitize_response(data)),
         headers={"Cache-Control": "public, max-age=3600"},
     )
+
+
+@v1.get(
+    "/player_roster_pct",
+    operation_id="getPlayerRosterPct",
+    description="Return current or historical Yahoo roster percentage for a player by ID or name.",
+)
+def player_roster_pct_endpoint(
+    mode: str = Query(..., pattern=r"^(current|history)$"),
+    player_id: Optional[str] = Query(None, description="Yahoo/NBA player ID"),
+    player_name: Optional[str] = Query(None, description="Exact player name"),
+):
+    pid = _parse_optional_int(player_id, "player_id")
+    name = player_name.strip() if player_name else None
+    if name == "":
+        name = None
+
+    if pid is None and not name:
+        raise HTTPException(status_code=400, detail="Provide player_id or player_name.")
+
+    try:
+        data = get_player_roster_pct(mode, player_id=pid, player_name=name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    if not data:
+        raise HTTPException(status_code=404, detail="No results.")
+
+    payload = {
+        "mode": mode,
+        "player_id": pid,
+        "player_name": name,
+        "count": len(data),
+        "data": data,
+    }
+
+    return JSONResponse(
+        content=jsonable_encoder(sanitize_response(payload)),
+        headers={"Cache-Control": "public, max-age=600"},
+    )
+
 
 # mount versioned router
 app.include_router(v1)

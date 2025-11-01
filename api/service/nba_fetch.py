@@ -10,6 +10,11 @@ DATASET = "nba_data"
 TABLE = "player_daily_game_stats_p"
 TABLE_FQN = f"{PROJECT_ID}.{DATASET}.{TABLE}"
 
+OWNERSHIP_CURRENT_FQN = (
+    "fantasy-survivor-app.nba_data.v_player_ownership_latest"
+)
+OWNERSHIP_HISTORY_FQN = "fantasy-survivor-app.nba_data.player_ownership"
+
 _TABLE_COLUMN_CACHE: set[str] | None = None
 
 
@@ -34,6 +39,7 @@ def _minutes_source(columns: set[str]) -> str | None:
 def _build_select_clause(
     client: bigquery.Client,
     requested: list[tuple[str, bool]],
+    table_alias: str | None = None,
 ) -> tuple[str, str | None]:
     """Return a SELECT clause for the requested columns.
 
@@ -54,19 +60,27 @@ def _build_select_clause(
     select_parts: list[str] = []
     missing_required: list[str] = []
 
+    def _with_alias(expr: str) -> str:
+        if not table_alias:
+            return expr
+        if " AS " in expr:
+            original, alias = expr.split(" AS ", 1)
+            return f"{table_alias}.{original.strip()} AS {alias.strip()}"
+        return f"{table_alias}.{expr}"
+
     for name, required in requested:
         if name == "minutes":
             if minutes_column:
                 if minutes_column == "minutes":
-                    select_parts.append("minutes")
+                    select_parts.append(_with_alias("minutes"))
                 else:
-                    select_parts.append(f"{minutes_column} AS minutes")
+                    select_parts.append(_with_alias(f"{minutes_column} AS minutes"))
             elif required:
                 missing_required.append("minutes")
             continue
 
         if name in columns:
-            select_parts.append(name)
+            select_parts.append(_with_alias(name))
         elif required:
             missing_required.append(name)
 
@@ -133,7 +147,9 @@ def get_daily_leaders(date, limit=10, mode="best", min_minutes: float = 0):
         ("z_score", True),
     ]
 
-    select_clause, minutes_column = _build_select_clause(client, requested_columns)
+    select_clause, minutes_column = _build_select_clause(
+        client, requested_columns, table_alias="stats"
+    )
 
     if not minutes_column:
         raise RuntimeError(
@@ -141,14 +157,20 @@ def get_daily_leaders(date, limit=10, mode="best", min_minutes: float = 0):
         )
 
     order_direction = "DESC" if mode == "best" else "ASC"
+    min_roster_pct = 0.0 if mode == "best" else 20.0
+    minutes_expr = f"stats.{minutes_column}"
 
     query = f"""
     SELECT
       {select_clause}
-    FROM `{TABLE_FQN}`
-    WHERE game_date = @date
-      AND {minutes_column} >= @min_minutes
-    ORDER BY z_score {order_direction}
+      , own.roster_pct
+    FROM `{TABLE_FQN}` AS stats
+    LEFT JOIN `fantasy-survivor-app.nba_data.v_player_ownership_latest` AS own
+      ON LOWER(stats.player_name) = LOWER(own.player_name)
+    WHERE stats.game_date = @date
+      AND {minutes_expr} >= @min_minutes
+      AND COALESCE(own.roster_pct, 0) >= @min_roster_pct
+    ORDER BY stats.z_score {order_direction}
     LIMIT @limit
     """
 
@@ -157,6 +179,7 @@ def get_daily_leaders(date, limit=10, mode="best", min_minutes: float = 0):
             bigquery.ScalarQueryParameter("date", "DATE", date),
             bigquery.ScalarQueryParameter("limit", "INT64", limit),
             bigquery.ScalarQueryParameter("min_minutes", "FLOAT64", float(min_minutes)),
+            bigquery.ScalarQueryParameter("min_roster_pct", "FLOAT64", min_roster_pct),
         ]
     )
     df = client.query(query, job_config=job_config).to_dataframe()
@@ -165,7 +188,11 @@ def get_daily_leaders(date, limit=10, mode="best", min_minutes: float = 0):
         if column not in df.columns:
             df[column] = None
 
-    return safe_records(df[[name for name, _ in requested_columns]])
+    if "roster_pct" not in df.columns:
+        df["roster_pct"] = None
+
+    output_columns = [name for name, _ in requested_columns] + ["roster_pct"]
+    return safe_records(df[output_columns])
 
 def get_player_time_series(player_id, start_date=None, end_date=None):
     client = get_client()
@@ -231,3 +258,58 @@ def get_player_time_series(player_id, start_date=None, end_date=None):
             df[column] = None
 
     return safe_records(df[[name for name, _ in requested_columns]])
+
+
+def get_player_roster_pct(
+    mode: str,
+    player_id: int | None = None,
+    player_name: str | None = None,
+):
+    if mode not in {"current", "history"}:
+        raise ValueError("mode must be either 'current' or 'history'")
+    if player_id is None and (player_name is None or not player_name.strip()):
+        raise ValueError("player_id or player_name is required")
+
+    client = get_client()
+
+    base_sql = """
+    SELECT
+      player_id,
+      player_name,
+      player_key,
+      roster_pct,
+      snapshot_date
+    FROM `{table}`
+    WHERE (@player_id IS NOT NULL AND player_id = @player_id)
+       OR (@player_name IS NOT NULL AND LOWER(player_name) = LOWER(@player_name))
+    {order_clause}
+    """
+
+    table = OWNERSHIP_CURRENT_FQN if mode == "current" else OWNERSHIP_HISTORY_FQN
+    order_clause = "ORDER BY snapshot_date" if mode == "history" else ""
+
+    query = base_sql.format(table=table, order_clause=order_clause)
+
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter("player_id", "INT64", player_id),
+            bigquery.ScalarQueryParameter("player_name", "STRING", player_name),
+        ]
+    )
+
+    df = client.query(query, job_config=job_config).to_dataframe()
+    if df.empty:
+        return []
+
+    output_columns = [
+        "player_id",
+        "player_name",
+        "player_key",
+        "roster_pct",
+        "snapshot_date",
+    ]
+    for column in output_columns:
+        if column not in df.columns:
+            df[column] = None
+
+    return safe_records(df[output_columns])
