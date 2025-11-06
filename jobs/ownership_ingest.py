@@ -1,4 +1,5 @@
 # jobs/ownership_ingest.py
+import argparse
 import os
 import time
 from datetime import date
@@ -6,6 +7,7 @@ from pathlib import Path
 
 import google.auth
 import pandas as pd
+from google.api_core.exceptions import NotFound
 from google.cloud import bigquery
 from requests.exceptions import HTTPError
 from yfpy.exceptions import YahooFantasySportsDataNotFound
@@ -198,6 +200,26 @@ def _call_with_retries(fn, *args, **kwargs):
 
     return None
 
+
+def _rows_exist_for_snapshot(client: bigquery.Client, snapshot_date: date) -> bool:
+    """Return True when the ownership table already has rows for ``snapshot_date``."""
+
+    sql = f"SELECT 1 FROM `{TABLE}` WHERE snapshot_date = @snapshot LIMIT 1"
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter("snapshot", "DATE", snapshot_date),
+        ]
+    )
+
+    try:
+        job = client.query(sql, job_config=job_config, location=BQ_LOCATION)
+    except NotFound:
+        return False
+
+    for _ in job.result():
+        return True
+    return False
+
 def _iter_player_pool(
     q: YahooFantasySportsQuery,
     statuses: list[str | None] | None = None,
@@ -256,7 +278,7 @@ def _percent_owned_batch_values(
     q: YahooFantasySportsQuery,
     league_key: str,
     player_keys: list[str],
-    week: str = "current",
+    week: int | str = "current",
 ) -> dict[str, float | None]:
     if not player_keys:
         return {}
@@ -289,7 +311,11 @@ def _percent_owned_batch_values(
     return results
 
 
-def fetch_yahoo_roster_df(q: YahooFantasySportsQuery) -> pd.DataFrame:
+def fetch_yahoo_roster_df(
+    q: YahooFantasySportsQuery,
+    *,
+    week: int | str = "current",
+) -> pd.DataFrame:
     """Pull Yahoo player pool and source roster_pct directly from percent_owned.value."""
 
     league_key = q.get_league_key()
@@ -308,7 +334,7 @@ def fetch_yahoo_roster_df(q: YahooFantasySportsQuery) -> pd.DataFrame:
     percent_owned_map: dict[str, float | None] = {}
     for start in range(0, len(unique_keys), PERCENT_OWNED_BATCH_SIZE):
         batch = unique_keys[start : start + PERCENT_OWNED_BATCH_SIZE]
-        batch_map = _percent_owned_batch_values(q, league_key, batch)
+        batch_map = _percent_owned_batch_values(q, league_key, batch, week=week)
         percent_owned_map.update(batch_map)
         if len(unique_keys) and ((start + len(batch)) % 100 == 0 or (start + len(batch)) == len(unique_keys)):
             processed = start + len(batch)
@@ -348,12 +374,23 @@ def fetch_yahoo_roster_df(q: YahooFantasySportsQuery) -> pd.DataFrame:
     )
     return df
 
-def run(snapshot: date | None = None) -> pd.DataFrame:
+def run(
+    snapshot: date | None = None,
+    *,
+    week: int | str | None = None,
+    force: bool = False,
+) -> pd.DataFrame:
     snapshot = snapshot or date.today()
     client = _bq()
     q = _yahoo_query()
 
-    yahoo_df = fetch_yahoo_roster_df(q)
+    if not force and _rows_exist_for_snapshot(client, snapshot):
+        print(f"[BQ] {TABLE} already has rows for {snapshot}; skipping ingestion.")
+        return pd.DataFrame()
+
+    week_value: int | str = week if week is not None else "current"
+
+    yahoo_df = fetch_yahoo_roster_df(q, week=week_value)
     if yahoo_df.empty:
         print("[Yahoo] no rows; aborting")
         return yahoo_df
@@ -384,10 +421,50 @@ def run(snapshot: date | None = None) -> pd.DataFrame:
         location=BQ_LOCATION,
     )
     job.result()
-    print(f"[BQ] done. {len(load_df)} rows → {TABLE} ({snapshot})")
+    print(f"[BQ] done. {len(load_df)} rows → {TABLE} ({snapshot}, week={week_value})")
     return merged
 
 print("[AUTH] project:", google.auth.default()[1])
 
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Load Yahoo percent-owned data into BigQuery.")
+    parser.add_argument(
+        "--snapshot-date",
+        dest="snapshot_date",
+        help="Snapshot date (YYYY-MM-DD). Defaults to today when omitted.",
+    )
+    parser.add_argument(
+        "--week",
+        dest="week",
+        help=(
+            "Yahoo percent-owned week identifier (int week number or 'current')."
+            " Defaults to 'current'."
+        ),
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Load data even if rows already exist for the snapshot date.",
+    )
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    run()
+    args = _parse_args()
+
+    snapshot_value: date | None = None
+    if args.snapshot_date:
+        try:
+            snapshot_value = date.fromisoformat(args.snapshot_date)
+        except ValueError as exc:
+            raise SystemExit(f"Invalid --snapshot-date value: {args.snapshot_date}") from exc
+
+    week_arg: int | str | None = None
+    if args.week:
+        week_arg = args.week
+        try:
+            week_arg = int(args.week)
+        except ValueError:
+            week_arg = args.week
+
+    run(snapshot=snapshot_value, week=week_arg, force=args.force)

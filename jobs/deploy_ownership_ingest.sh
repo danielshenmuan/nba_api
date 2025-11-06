@@ -1,32 +1,33 @@
 #!/usr/bin/env bash
-# Build and deploy the FastAPI service to Cloud Run.
+# Deploy the ownership_ingest Cloud Run job image and update the job to use it.
 #
 # Usage:
-#   chmod +x deploy_app.sh
-#   ./deploy_app.sh
+#   chmod +x deploy_ownership_ingest.sh
+#   ./deploy_ownership_ingest.sh
 #
 # Optional environment variables:
-#   IMAGE_REPO       (default: us-central1-docker.pkg.dev/$PROJECT_ID/nba-api)
+#   IMAGE_REPO       (default: us-central1-docker.pkg.dev/$PROJECT_ID/nba-jobs)
 #   PROJECT_ID       (default: fantasy-survivor-app)
 #   REGION           (default: us-central1)
-#   SERVICE_NAME     (default: nba-gbq-api)
+#   JOB_NAME         (default: nba-ownership-ingest)
+#   IMAGE_NAME       (default: $JOB_NAME)
 #   IMAGE_TAG        (default: timestamp)
-#   PLATFORM         (default: managed)
-#   SERVICE_ACCOUNT  (if set, used during deployment)
-#   ALLOW_UNAUTH     (default: 1, pass 0 to skip --allow-unauthenticated)
+#   SERVICE_ACCOUNT  (if set, used when updating the job)
+#   EXECUTE_AFTER_DEPLOY (set to 1 to run the job immediately after updating)
 
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+BUILD_CONTEXT="${SCRIPT_DIR}"
 
 PROJECT_ID=${PROJECT_ID:-fantasy-survivor-app}
 REGION=${REGION:-us-central1}
-SERVICE_NAME=${SERVICE_NAME:-nba-gbq-api}
+JOB_NAME=${JOB_NAME:-nba-ownership-ingest}
+IMAGE_NAME=${IMAGE_NAME:-${JOB_NAME}}
 IMAGE_TAG=${IMAGE_TAG:-$(date +%Y%m%d%H%M%S)}
-PLATFORM=${PLATFORM:-managed}
 
 if [[ -z "${IMAGE_REPO:-}" ]]; then
-  IMAGE_REPO="us-central1-docker.pkg.dev/${PROJECT_ID}/nba-api"
+  IMAGE_REPO="us-central1-docker.pkg.dev/${PROJECT_ID}/nba-jobs"
 fi
 
 ensure_repo_exists() {
@@ -57,35 +58,47 @@ ensure_repo_exists() {
       --project "${repo_project}" \
       --location "${location}" \
       --repository-format=docker \
-      --description "Created by deploy_app.sh"
+      --description "Created by deploy_ownership_ingest.sh"
   fi
 }
 
 ensure_repo_exists "${IMAGE_REPO}"
 
-IMAGE_URI="${IMAGE_REPO}/nba-api:${IMAGE_TAG}"
+IMAGE_URI="${IMAGE_REPO}/${IMAGE_NAME}:${IMAGE_TAG}"
+
+if ! gcloud run jobs describe "${JOB_NAME}" \
+  --project "${PROJECT_ID}" \
+  --region "${REGION}" >/dev/null 2>&1; then
+  cat <<EOF_ERR >&2
+Cloud Run job "${JOB_NAME}" was not found in project ${PROJECT_ID} (${REGION}).
+Create the job manually first, then rerun this script to update its image.
+EOF_ERR
+  exit 1
+fi
 
 echo "Building container image ${IMAGE_URI}..."
-gcloud builds submit "${SCRIPT_DIR}" \
+gcloud builds submit "${BUILD_CONTEXT}" \
   --project "${PROJECT_ID}" \
   --tag "${IMAGE_URI}"
 
-declare -a DEPLOY_ARGS=(
+declare -a UPDATE_ARGS=(
+  "--image" "${IMAGE_URI}"
   "--project" "${PROJECT_ID}"
   "--region" "${REGION}"
-  "--image" "${IMAGE_URI}"
-  "--platform" "${PLATFORM}"
 )
 
 if [[ -n "${SERVICE_ACCOUNT:-}" ]]; then
-  DEPLOY_ARGS+=("--service-account" "${SERVICE_ACCOUNT}")
+  UPDATE_ARGS+=("--service-account" "${SERVICE_ACCOUNT}")
 fi
 
-if [[ "${ALLOW_UNAUTH:-1}" == "1" ]]; then
-  DEPLOY_ARGS+=("--allow-unauthenticated")
+printf '\nUpdating Cloud Run job %s...\n' "${JOB_NAME}"
+gcloud run jobs update "${JOB_NAME}" "${UPDATE_ARGS[@]}"
+
+if [[ "${EXECUTE_AFTER_DEPLOY:-0}" == "1" ]]; then
+  printf '\nExecuting Cloud Run job %s...\n' "${JOB_NAME}"
+  gcloud run jobs execute "${JOB_NAME}" \
+    --project "${PROJECT_ID}" \
+    --region "${REGION}"
 fi
 
-printf '\nDeploying Cloud Run service %s...\n' "${SERVICE_NAME}"
-gcloud run deploy "${SERVICE_NAME}" "${DEPLOY_ARGS[@]}"
-
-printf '\nDeployment complete. Service %s now serves image %s.\n' "${SERVICE_NAME}" "${IMAGE_URI}"
+printf '\nDeployment complete. Job %s now uses image %s.\n' "${JOB_NAME}" "${IMAGE_URI}"
