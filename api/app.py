@@ -166,23 +166,18 @@ def player_baselines_v1_endpoint(
 @v1.get(
     "/player_roster_pct",
     operation_id="getPlayerRosterPct",
-    description="Return current or historical Yahoo roster percentage for a player by ID or name.",
+    description="Return current or historical Yahoo roster percentage for a player by ID.",
 )
 def player_roster_pct_endpoint(
-    mode: str = Query(..., pattern=r"^(current|history)$"),
-    player_id: Optional[str] = Query(None, description="Yahoo/NBA player ID"),
-    player_name: Optional[str] = Query(None, description="Exact player name"),
+    mode: str = Query("current", pattern=r"^(current|history)$"),
+    player_id: str = Query(..., description="Yahoo/NBA player ID"),
 ):
     pid = _parse_optional_int(player_id, "player_id")
-    name = player_name.strip() if player_name else None
-    if name == "":
-        name = None
-
-    if pid is None and not name:
-        raise HTTPException(status_code=400, detail="Provide player_id or player_name.")
+    if pid is None:
+        raise HTTPException(status_code=400, detail="Provide a valid numeric player_id.")
 
     try:
-        data = get_player_roster_pct(mode, player_id=pid, player_name=name)
+        data = get_player_roster_pct(mode, player_id=pid)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -192,7 +187,6 @@ def player_roster_pct_endpoint(
     payload = {
         "mode": mode,
         "player_id": pid,
-        "player_name": name,
         "count": len(data),
         "data": data,
     }

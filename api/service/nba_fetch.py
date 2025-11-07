@@ -263,12 +263,11 @@ def get_player_time_series(player_id, start_date=None, end_date=None):
 def get_player_roster_pct(
     mode: str,
     player_id: int | None = None,
-    player_name: str | None = None,
 ):
     if mode not in {"current", "history"}:
         raise ValueError("mode must be either 'current' or 'history'")
-    if player_id is None and (player_name is None or not player_name.strip()):
-        raise ValueError("player_id or player_name is required")
+    if player_id is None:
+        raise ValueError("player_id is required")
 
     client = get_client()
 
@@ -280,8 +279,7 @@ def get_player_roster_pct(
       roster_pct,
       snapshot_date
     FROM `{table}`
-    WHERE (@player_id IS NOT NULL AND player_id = @player_id)
-       OR (@player_name IS NOT NULL AND LOWER(player_name) = LOWER(@player_name))
+    WHERE player_id = @player_id
     {order_clause}
     """
 
@@ -293,7 +291,6 @@ def get_player_roster_pct(
     job_config = bigquery.QueryJobConfig(
         query_parameters=[
             bigquery.ScalarQueryParameter("player_id", "INT64", player_id),
-            bigquery.ScalarQueryParameter("player_name", "STRING", player_name),
         ]
     )
 
