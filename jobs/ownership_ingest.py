@@ -1,6 +1,5 @@
 # jobs/ownership_ingest.py
 import argparse
-import json
 import os
 import time
 from datetime import date
@@ -57,65 +56,34 @@ if missing:
 
 TOKEN_ENV_VAR = "YAHOO_OAUTH2_JSON"
 TOKEN_PATH_ENV_VAR = "YAHOO_OAUTH2_JSON_PATH"
-TMP_TOKEN_PATH = Path("/tmp/yahoo_oauth2.json")
 
 
-def _validate_token_file(path: Path) -> Path:
-    try:
-        payload = json.loads(path.read_text())
-    except json.JSONDecodeError as exc:
-        raise SystemExit(
-            f"Yahoo OAuth token file at {path} is not valid JSON: {exc}"
-        ) from exc
+def _resolve_token_path() -> Path:
+    """Return the Yahoo OAuth token JSON path, writing env secrets when provided."""
 
-    if not payload.get("refresh_token"):
-        raise SystemExit(
-            f"Yahoo OAuth token file at {path} is missing a refresh_token; run the device flow "
-            "locally and upload the resulting credentials JSON"
-        )
+    token_raw = os.getenv(TOKEN_ENV_VAR)
+    if token_raw:
+        tmp_path = Path("/tmp/yahoo_oauth2.json")
+        tmp_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path.write_text(token_raw)
+        return tmp_path
 
-    return path
+    explicit = os.getenv(TOKEN_PATH_ENV_VAR)
+    if explicit:
+        explicit_path = Path(explicit)
+        if explicit_path.exists():
+            return explicit_path
 
+    for candidate in (
+        Path("./yahoo_oauth2.json"),
+        Path.home() / ".credentials" / "yahoo_oauth2.json",
+    ):
+        if candidate.exists():
+            return candidate
 
-def _ensure_token_file() -> Path:
-    """Persist Yahoo OAuth credentials to disk and return the path."""
-
-    raw_json = os.getenv(TOKEN_ENV_VAR)
-    explicit_path = os.getenv(TOKEN_PATH_ENV_VAR)
-
-    if explicit_path:
-        path = Path(explicit_path)
-        if raw_json:
-            path.write_text(raw_json)
-            return _validate_token_file(path)
-        if path.exists():
-            return _validate_token_file(path)
-        raise SystemExit(
-            "YAHOO_OAUTH2_JSON_PATH is set but the file is missing; provide JSON via "
-            f"{TOKEN_ENV_VAR} or mount the credential file"
-        )
-
-    if raw_json:
-        TMP_TOKEN_PATH.write_text(raw_json)
-        return _validate_token_file(TMP_TOKEN_PATH)
-
-    # Backwards compatibility: allow discrete token env vars if present.
-    access_token = os.getenv("YAHOO_ACCESS_TOKEN")
-    refresh_token = os.getenv("YAHOO_REFRESH_TOKEN")
-    if access_token and refresh_token:
-        token_payload = {
-            "access_token": access_token,
-            "refresh_token": refresh_token,
-            "token_type": os.getenv("YAHOO_TOKEN_TYPE", "bearer"),
-        }
-        if os.getenv("YAHOO_TOKEN_EXPIRES_AT"):
-            token_payload["expires_at"] = os.environ["YAHOO_TOKEN_EXPIRES_AT"]
-        TMP_TOKEN_PATH.write_text(json.dumps(token_payload))
-        return _validate_token_file(TMP_TOKEN_PATH)
-
-    raise SystemExit(
-        "Provide Yahoo OAuth credentials via YAHOO_OAUTH2_JSON (preferred) or set "
-        "YAHOO_OAUTH2_JSON_PATH to a readable token file."
+    raise RuntimeError(
+        "No Yahoo OAuth token JSON found. Set YAHOO_OAUTH2_JSON, "
+        "YAHOO_OAUTH2_JSON_PATH, or place yahoo_oauth2.json in a default location."
     )
 
 # ---------- Helpers ----------
@@ -141,14 +109,15 @@ def _player_dim_map(client: bigquery.Client) -> pd.DataFrame:
     return df[["name_lc", "player_id", "player_name"]]
 
 def _yahoo_query():
-    token_path = _ensure_token_file()
+    token_path = Path(_resolve_token_path())
+    env_dir = token_path if token_path.is_dir() else token_path.parent
     kwargs = dict(
         league_id=os.environ["YAHOO_LEAGUE_ID"],
-        game_code="nba",
+        game_code=os.getenv("YAHOO_GAME_CODE", "nba"),
         yahoo_consumer_key=os.environ["YAHOO_CONSUMER_KEY"],
         yahoo_consumer_secret=os.environ["YAHOO_CONSUMER_SECRET"],
         yahoo_access_token_json=token_path.read_text(),
-        env_file_location=token_path.parent,
+        env_file_location=env_dir,
     )
     gid = os.getenv("YAHOO_GAME_ID")
     if gid:
