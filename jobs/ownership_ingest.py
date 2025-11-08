@@ -147,7 +147,8 @@ def _yahoo_query():
         game_code="nba",
         yahoo_consumer_key=os.environ["YAHOO_CONSUMER_KEY"],
         yahoo_consumer_secret=os.environ["YAHOO_CONSUMER_SECRET"],
-        env_file_location=str(token_path),
+        yahoo_access_token_json=token_path.read_text(),
+        env_file_location=token_path.parent,
     )
     gid = os.getenv("YAHOO_GAME_ID")
     if gid:
