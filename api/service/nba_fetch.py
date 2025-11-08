@@ -275,6 +275,7 @@ def get_player_roster_pct(
     SELECT
       player_id,
       player_name,
+      player_key,
       roster_pct,
       snapshot_date
     FROM `{table}`

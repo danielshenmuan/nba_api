@@ -31,8 +31,21 @@ SCHEDULE=${SCHEDULE:-"0 1 * * *"}
 TIME_ZONE=${TIME_ZONE:-America/New_York}
 OAUTH_SCOPE=${OAUTH_SCOPE:-"https://www.googleapis.com/auth/cloud-platform"}
 
-# NEW: set SA directly (can still override via env when invoking the script)
-SCHEDULER_SERVICE_ACCOUNT=${SCHEDULER_SERVICE_ACCOUNT:-nba-gbq-sa@fantasy-survivor-app.iam.gserviceaccount.com}
+if ! gcloud run jobs describe "${JOB_NAME}" \
+  --project "${PROJECT_ID}" \
+  --region "${REGION}" >/dev/null 2>&1; then
+  cat <<EOF >&2
+Cloud Run job "${JOB_NAME}" was not found in project ${PROJECT_ID} (${REGION}).
+Deploy the job first, then configure Cloud Scheduler.
+EOF
+  exit 1
+fi
+
+resolve_service_account() {
+  if [[ -n "${SCHEDULER_SERVICE_ACCOUNT:-}" ]]; then
+    echo "${SCHEDULER_SERVICE_ACCOUNT}"
+    return
+  fi
 
 # Remove resolve_service_account + related checks
 if ! gcloud run jobs describe "${JOB_NAME}" --project "${PROJECT_ID}" --region "${REGION}" >/dev/null 2>&1; then
