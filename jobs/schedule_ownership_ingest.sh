@@ -31,40 +31,12 @@ SCHEDULE=${SCHEDULE:-"0 1 * * *"}
 TIME_ZONE=${TIME_ZONE:-America/New_York}
 OAUTH_SCOPE=${OAUTH_SCOPE:-"https://www.googleapis.com/auth/cloud-platform"}
 
-if ! gcloud run jobs describe "${JOB_NAME}" \
-  --project "${PROJECT_ID}" \
-  --region "${REGION}" >/dev/null 2>&1; then
-  cat <<EOF >&2
-Cloud Run job "${JOB_NAME}" was not found in project ${PROJECT_ID} (${REGION}).
-Deploy the job first, then configure Cloud Scheduler.
-EOF
-  exit 1
-fi
+# NEW: set SA directly (can still override via env when invoking the script)
+SCHEDULER_SERVICE_ACCOUNT=${SCHEDULER_SERVICE_ACCOUNT:-nba-gbq-sa@fantasy-survivor-app.iam.gserviceaccount.com}
 
-resolve_service_account() {
-  if [[ -n "${SCHEDULER_SERVICE_ACCOUNT:-}" ]]; then
-    echo "${SCHEDULER_SERVICE_ACCOUNT}"
-    return
-  fi
-
-  local job_sa
-  job_sa=$(gcloud run jobs describe "${JOB_NAME}" \
-    --project "${PROJECT_ID}" \
-    --region "${REGION}" \
-    --format='value(spec.template.template.serviceAccount)' 2>/dev/null || true)
-
-  if [[ -n "${job_sa}" ]]; then
-    echo "${job_sa}"
-    return
-  fi
-
-  echo ""  # no service account resolved
-}
-
-SCHEDULER_SERVICE_ACCOUNT=$(resolve_service_account)
-
-if [[ -z "${SCHEDULER_SERVICE_ACCOUNT}" ]]; then
-  echo "Unable to determine a service account. Set SCHEDULER_SERVICE_ACCOUNT or ensure the Cloud Run job has one configured." >&2
+# Remove resolve_service_account + related checks
+if ! gcloud run jobs describe "${JOB_NAME}" --project "${PROJECT_ID}" --region "${REGION}" >/dev/null 2>&1; then
+  >&2 echo "Cloud Run job \"${JOB_NAME}\" was not found in project ${PROJECT_ID} (${REGION})."
   exit 1
 fi
 
