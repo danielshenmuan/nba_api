@@ -48,43 +48,28 @@ if ROOT_ENV.exists():
 REQ = [
     "YAHOO_CONSUMER_KEY",
     "YAHOO_CONSUMER_SECRET",
-    "YAHOO_LEAGUE_ID",
+    "YAHOO_ACCESS_TOKEN",
+    "YAHOO_REFRESH_TOKEN",
+    # optional but nice to have:
+    # "YAHOO_TOKEN_TYPE", "YAHOO_TOKEN_EXPIRES_AT"
 ]
 missing = [k for k in REQ if not os.getenv(k)]
 if missing:
     raise SystemExit(f"Missing required env vars: {missing}")
 
-TOKEN_ENV_VAR = "YAHOO_OAUTH2_JSON"
-TOKEN_PATH_ENV_VAR = "YAHOO_OAUTH2_JSON_PATH"
-
-
-def _resolve_token_path() -> Path:
-    """Return the Yahoo OAuth token JSON path, writing env secrets when provided."""
-
-    token_raw = os.getenv(TOKEN_ENV_VAR)
-    if token_raw:
-        tmp_path = Path("/tmp/yahoo_oauth2.json")
-        tmp_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path.write_text(token_raw)
-        return tmp_path
-
-    explicit = os.getenv(TOKEN_PATH_ENV_VAR)
-    if explicit:
-        explicit_path = Path(explicit)
-        if explicit_path.exists():
-            return explicit_path
-
-    for candidate in (
-        Path("./yahoo_oauth2.json"),
-        Path.home() / ".credentials" / "yahoo_oauth2.json",
-    ):
-        if candidate.exists():
-            return candidate
-
-    raise RuntimeError(
-        "No Yahoo OAuth token JSON found. Set YAHOO_OAUTH2_JSON, "
-        "YAHOO_OAUTH2_JSON_PATH, or place yahoo_oauth2.json in a default location."
-    )
+TMP_ENV = Path("/tmp/yahoo_tokens.env")
+lines = [
+    f"YAHOO_CONSUMER_KEY={os.environ['YAHOO_CONSUMER_KEY']}",
+    f"YAHOO_CONSUMER_SECRET={os.environ['YAHOO_CONSUMER_SECRET']}",
+    f"YAHOO_ACCESS_TOKEN={os.environ['YAHOO_ACCESS_TOKEN']}",
+    f"YAHOO_REFRESH_TOKEN={os.environ['YAHOO_REFRESH_TOKEN']}",
+    f"YAHOO_LEAGUE_ID={os.environ['YAHOO_LEAGUE_ID']}",
+    f"YAHOO_GAME_ID={os.getenv('YAHOO_GAME_ID','')}",
+]
+# optional extras if you have them
+if os.getenv("YAHOO_TOKEN_TYPE"):      lines.append(f"YAHOO_TOKEN_TYPE={os.environ['YAHOO_TOKEN_TYPE']}")
+# if os.getenv("YAHOO_TOKEN_EXPIRES_AT"): lines.append(f"YAHOO_TOKEN_EXPIRES_AT={os.environ['YAHOO_TOKEN_EXPIRES_AT']}")
+TMP_ENV.write_text("\n".join(lines))
 
 # ---------- Helpers ----------
 def _bq() -> bigquery.Client:
@@ -109,15 +94,12 @@ def _player_dim_map(client: bigquery.Client) -> pd.DataFrame:
     return df[["name_lc", "player_id", "player_name"]]
 
 def _yahoo_query():
-    token_path = Path(_resolve_token_path())
-    env_dir = token_path if token_path.is_dir() else token_path.parent
     kwargs = dict(
         league_id=os.environ["YAHOO_LEAGUE_ID"],
-        game_code=os.getenv("YAHOO_GAME_CODE", "nba"),
+        game_code="nba",
         yahoo_consumer_key=os.environ["YAHOO_CONSUMER_KEY"],
         yahoo_consumer_secret=os.environ["YAHOO_CONSUMER_SECRET"],
-        yahoo_access_token_json=token_path.read_text(),
-        env_file_location=env_dir,
+        env_file_location=TMP_ENV,  # writable in Cloud Run
     )
     gid = os.getenv("YAHOO_GAME_ID")
     if gid:
