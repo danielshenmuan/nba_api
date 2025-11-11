@@ -1,19 +1,22 @@
 #!/usr/bin/env bash
-# Deploy the daily_ingest Cloud Run job image and update the job to use it.
+# Deploy the backfill_daily_ingest Cloud Run job image and update the
+# existing nba-daily-ingest job to execute the backfill script.
 #
 # Usage:
-#   chmod +x deploy_daily_ingest.sh
-#   ./deploy_daily_ingest.sh
+#   chmod +x deploy_backfill_daily_ingest.sh
+#   ./deploy_backfill_daily_ingest.sh
 #
 # Optional environment variables:
-#   IMAGE_REPO       (default: us-central1-docker.pkg.dev/$PROJECT_ID/nba-jobs)
-#   PROJECT_ID       (default: fantasy-survivor-app)
-#   REGION           (default: us-central1)
-#   JOB_NAME         (default: nba-daily-ingest)
-#   IMAGE_NAME       (default: $JOB_NAME)
-#   IMAGE_TAG        (default: timestamp)
-#   SERVICE_ACCOUNT  (if set, used when updating the job)
+#   IMAGE_REPO        (default: us-central1-docker.pkg.dev/$PROJECT_ID/nba-jobs)
+#   PROJECT_ID        (default: fantasy-survivor-app)
+#   REGION            (default: us-central1)
+#   JOB_NAME          (default: nba-daily-ingest)
+#   IMAGE_NAME        (default: backfill-daily-ingest)
+#   IMAGE_TAG         (default: timestamp)
+#   SERVICE_ACCOUNT   (if set, used when updating the job)
 #   EXECUTE_AFTER_DEPLOY (set to 1 to run the job immediately after updating)
+#   BACKFILL_ARGS     (optional space-delimited arguments appended after
+#                      backfill_daily_ingest.py when updating the job)
 
 set -euo pipefail
 
@@ -23,7 +26,7 @@ BUILD_CONTEXT="${SCRIPT_DIR}"
 PROJECT_ID=${PROJECT_ID:-fantasy-survivor-app}
 REGION=${REGION:-us-central1}
 JOB_NAME=${JOB_NAME:-nba-daily-ingest}
-IMAGE_NAME=${IMAGE_NAME:-${JOB_NAME}}
+IMAGE_NAME=${IMAGE_NAME:-backfill-daily-ingest}
 IMAGE_TAG=${IMAGE_TAG:-$(date +%Y%m%d%H%M%S)}
 
 if [[ -z "${IMAGE_REPO:-}" ]]; then
@@ -58,7 +61,7 @@ ensure_repo_exists() {
       --project "${repo_project}" \
       --location "${location}" \
       --repository-format=docker \
-      --description "Created by deploy_daily_ingest.sh"
+      --description "Created by deploy_backfill_daily_ingest.sh"
   fi
 }
 
@@ -85,10 +88,20 @@ declare -a UPDATE_ARGS=(
   "--image" "${IMAGE_URI}"
   "--project" "${PROJECT_ID}"
   "--region" "${REGION}"
+  "--command" "python"
+  "--args" "backfill_daily_ingest.py"
 )
 
 if [[ -n "${SERVICE_ACCOUNT:-}" ]]; then
   UPDATE_ARGS+=("--service-account" "${SERVICE_ACCOUNT}")
+fi
+
+if [[ -n "${BACKFILL_ARGS:-}" ]]; then
+  # shellcheck disable=SC2206
+  EXTRA_ARGS=(${BACKFILL_ARGS})
+  for arg in "${EXTRA_ARGS[@]}"; do
+    UPDATE_ARGS+=("--args" "${arg}")
+  done
 fi
 
 printf '\nUpdating Cloud Run job %s...\n' "${JOB_NAME}"
@@ -101,4 +114,5 @@ if [[ "${EXECUTE_AFTER_DEPLOY:-0}" == "1" ]]; then
     --region "${REGION}"
 fi
 
-printf '\nDeployment complete. Job %s now uses image %s.\n' "${JOB_NAME}" "${IMAGE_URI}"
+printf '\nDeployment complete. Job %s now uses image %s and runs backfill_daily_ingest.py.\n' \
+  "${JOB_NAME}" "${IMAGE_URI}"

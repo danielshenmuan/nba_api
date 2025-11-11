@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# Deploy the daily_ingest Cloud Run job image and update the job to use it.
+# Deploy the ownership_ingest Cloud Run job image and update the job to use it.
 #
 # Usage:
-#   chmod +x deploy_daily_ingest.sh
-#   ./deploy_daily_ingest.sh
+#   chmod +x deploy_ownership_ingest.sh
+#   ./deploy_ownership_ingest.sh
 #
 # Optional environment variables:
 #   IMAGE_REPO       (default: us-central1-docker.pkg.dev/$PROJECT_ID/nba-jobs)
 #   PROJECT_ID       (default: fantasy-survivor-app)
 #   REGION           (default: us-central1)
-#   JOB_NAME         (default: nba-daily-ingest)
+#   JOB_NAME         (default: nba-ownership-ingest)
 #   IMAGE_NAME       (default: $JOB_NAME)
 #   IMAGE_TAG        (default: timestamp)
 #   SERVICE_ACCOUNT  (if set, used when updating the job)
@@ -22,7 +22,7 @@ BUILD_CONTEXT="${SCRIPT_DIR}"
 
 PROJECT_ID=${PROJECT_ID:-fantasy-survivor-app}
 REGION=${REGION:-us-central1}
-JOB_NAME=${JOB_NAME:-nba-daily-ingest}
+JOB_NAME=${JOB_NAME:-nba-ownership-ingest}
 IMAGE_NAME=${IMAGE_NAME:-${JOB_NAME}}
 IMAGE_TAG=${IMAGE_TAG:-$(date +%Y%m%d%H%M%S)}
 
@@ -58,7 +58,7 @@ ensure_repo_exists() {
       --project "${repo_project}" \
       --location "${location}" \
       --repository-format=docker \
-      --description "Created by deploy_daily_ingest.sh"
+      --description "Created by deploy_ownership_ingest.sh"
   fi
 }
 
@@ -69,10 +69,10 @@ IMAGE_URI="${IMAGE_REPO}/${IMAGE_NAME}:${IMAGE_TAG}"
 if ! gcloud run jobs describe "${JOB_NAME}" \
   --project "${PROJECT_ID}" \
   --region "${REGION}" >/dev/null 2>&1; then
-  cat <<EOF >&2
+  cat <<EOF_ERR >&2
 Cloud Run job "${JOB_NAME}" was not found in project ${PROJECT_ID} (${REGION}).
 Create the job manually first, then rerun this script to update its image.
-EOF
+EOF_ERR
   exit 1
 fi
 
