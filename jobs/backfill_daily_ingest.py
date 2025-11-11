@@ -5,7 +5,7 @@ import argparse
 import importlib
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Iterable
 
@@ -106,7 +106,7 @@ def _parse_args() -> argparse.Namespace:
         "--date",
         default=None,
         type=lambda value: datetime.strptime(value, "%Y-%m-%d"),
-        help="Target date in YYYY-MM-DD format. Defaults to today when omitted.",
+        help="Target date in YYYY-MM-DD format. Defaults to yesterday when omitted.",
     )
     parser.add_argument(
         "--season",
@@ -175,9 +175,12 @@ def _display_frame(df: pd.DataFrame, max_rows: int | None = None) -> None:
 
 def main() -> int:
     args = _parse_args()
-    target_date: datetime = args.date or datetime.utcnow().replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )
+    if args.date is not None:
+        target_date: datetime = args.date
+    else:
+        target_date = (datetime.utcnow() - timedelta(days=1)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
 
     season_value = args.season or _season_from_date(target_date)
 
