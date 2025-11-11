@@ -1,6 +1,8 @@
 # jobs/ownership_ingest.py
 import argparse
+import importlib.util
 import os
+import shlex
 import time
 from datetime import date
 from pathlib import Path
@@ -36,40 +38,103 @@ PERCENT_OWNED_BATCH_SIZE = int(os.getenv("YAHOO_PERCENT_BATCH_SIZE", "25"))
 # GAME_ID = os.environ.get("YAHOO_GAME_ID")  # strongly recommended to avoid prompts
 
 ROOT_ENV = Path(__file__).resolve().parents[1] / ".env"
-if ROOT_ENV.exists():
-    try:
-        from dotenv import dotenv_values
-        os.environ.update({k: v for k, v in dotenv_values(ROOT_ENV).items() if v})
-        print(f"[env] loaded {ROOT_ENV}")
-    except Exception:
-        pass  # ignore if python-dotenv not installed in the image
+
+
+def _parse_env_file(path: Path) -> dict[str, str]:
+    """Minimal .env parser that handles KEY=VALUE and quoted strings."""
+
+    values: dict[str, str] = {}
+    for raw_line in path.read_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+
+        if not key:
+            continue
+
+        if value and value[0] == value[-1] and value[0] in {'"', "'"}:
+            parsed = value[1:-1]
+        else:
+            try:
+                parsed = shlex.split(value, posix=True)[0] if value else ""
+            except ValueError:
+                parsed = value
+
+        if parsed:
+            values[key] = parsed
+
+    return values
+
+
+def _load_root_env(env_path: Path) -> None:
+    if not env_path.exists():
+        return
+
+    values: dict[str, str] = {}
+
+    spec = importlib.util.find_spec("dotenv")
+    if spec is not None:
+        from dotenv import dotenv_values  # type: ignore  # imported only when available
+
+        loaded = {k: v for k, v in dotenv_values(env_path).items() if v}
+        if loaded:
+            values.update(loaded)
+
+    if not values:
+        values.update(_parse_env_file(env_path))
+
+    if values:
+        os.environ.update(values)
+        print(f"[env] loaded {env_path}")
+
+
+_load_root_env(ROOT_ENV)
 
 # Required in any environment (Cloud Run: provided via --set-env-vars)
 REQ = [
     "YAHOO_CONSUMER_KEY",
     "YAHOO_CONSUMER_SECRET",
-    "YAHOO_ACCESS_TOKEN",
-    "YAHOO_REFRESH_TOKEN",
-    # optional but nice to have:
-    # "YAHOO_TOKEN_TYPE", "YAHOO_TOKEN_EXPIRES_AT"
+    "YAHOO_LEAGUE_ID",
 ]
 missing = [k for k in REQ if not os.getenv(k)]
 if missing:
     raise SystemExit(f"Missing required env vars: {missing}")
 
-TMP_ENV = Path("/tmp/yahoo_tokens.env")
-lines = [
-    f"YAHOO_CONSUMER_KEY={os.environ['YAHOO_CONSUMER_KEY']}",
-    f"YAHOO_CONSUMER_SECRET={os.environ['YAHOO_CONSUMER_SECRET']}",
-    f"YAHOO_ACCESS_TOKEN={os.environ['YAHOO_ACCESS_TOKEN']}",
-    f"YAHOO_REFRESH_TOKEN={os.environ['YAHOO_REFRESH_TOKEN']}",
-    f"YAHOO_LEAGUE_ID={os.environ['YAHOO_LEAGUE_ID']}",
-    f"YAHOO_GAME_ID={os.getenv('YAHOO_GAME_ID','')}",
-]
-# optional extras if you have them
-if os.getenv("YAHOO_TOKEN_TYPE"):      lines.append(f"YAHOO_TOKEN_TYPE={os.environ['YAHOO_TOKEN_TYPE']}")
-# if os.getenv("YAHOO_TOKEN_EXPIRES_AT"): lines.append(f"YAHOO_TOKEN_EXPIRES_AT={os.environ['YAHOO_TOKEN_EXPIRES_AT']}")
-TMP_ENV.write_text("\n".join(lines))
+TOKEN_ENV_VAR = "YAHOO_OAUTH2_JSON"
+TOKEN_PATH_ENV_VAR = "YAHOO_OAUTH2_JSON_PATH"
+
+
+def _resolve_token_path() -> Path:
+    """Return the Yahoo OAuth token JSON path, writing env secrets when provided."""
+
+    token_raw = os.getenv(TOKEN_ENV_VAR)
+    if token_raw:
+        tmp_path = Path("/tmp/yahoo_oauth2.json")
+        tmp_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path.write_text(token_raw)
+        return tmp_path
+
+    explicit = os.getenv(TOKEN_PATH_ENV_VAR)
+    if explicit:
+        explicit_path = Path(explicit)
+        if explicit_path.exists():
+            return explicit_path
+
+    for candidate in (
+        Path("./yahoo_oauth2.json"),
+        Path.home() / ".credentials" / "yahoo_oauth2.json",
+    ):
+        if candidate.exists():
+            return candidate
+
+    raise RuntimeError(
+        "No Yahoo OAuth token JSON found. Set YAHOO_OAUTH2_JSON, "
+        "YAHOO_OAUTH2_JSON_PATH, or place yahoo_oauth2.json in a default location."
+    )
 
 # ---------- Helpers ----------
 def _bq() -> bigquery.Client:
@@ -94,12 +159,15 @@ def _player_dim_map(client: bigquery.Client) -> pd.DataFrame:
     return df[["name_lc", "player_id", "player_name"]]
 
 def _yahoo_query():
+    token_path = Path(_resolve_token_path())
+    env_dir = token_path if token_path.is_dir() else token_path.parent
     kwargs = dict(
         league_id=os.environ["YAHOO_LEAGUE_ID"],
-        game_code="nba",
+        game_code=os.getenv("YAHOO_GAME_CODE", "nba"),
         yahoo_consumer_key=os.environ["YAHOO_CONSUMER_KEY"],
         yahoo_consumer_secret=os.environ["YAHOO_CONSUMER_SECRET"],
-        env_file_location=TMP_ENV,  # writable in Cloud Run
+        yahoo_access_token_json=token_path.read_text(),
+        env_file_location=env_dir,
     )
     gid = os.getenv("YAHOO_GAME_ID")
     if gid:
