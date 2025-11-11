@@ -47,24 +47,9 @@ resolve_service_account() {
     return
   fi
 
-  local job_sa
-  job_sa=$(gcloud run jobs describe "${JOB_NAME}" \
-    --project "${PROJECT_ID}" \
-    --region "${REGION}" \
-    --format='value(spec.template.template.serviceAccount)' 2>/dev/null || true)
-
-  if [[ -n "${job_sa}" ]]; then
-    echo "${job_sa}"
-    return
-  fi
-
-  echo ""  # no service account resolved
-}
-
-SCHEDULER_SERVICE_ACCOUNT=$(resolve_service_account)
-
-if [[ -z "${SCHEDULER_SERVICE_ACCOUNT}" ]]; then
-  echo "Unable to determine a service account. Set SCHEDULER_SERVICE_ACCOUNT or ensure the Cloud Run job has one configured." >&2
+# Remove resolve_service_account + related checks
+if ! gcloud run jobs describe "${JOB_NAME}" --project "${PROJECT_ID}" --region "${REGION}" >/dev/null 2>&1; then
+  >&2 echo "Cloud Run job \"${JOB_NAME}\" was not found in project ${PROJECT_ID} (${REGION})."
   exit 1
 fi
 
