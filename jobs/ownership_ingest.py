@@ -1,17 +1,30 @@
 # jobs/ownership_ingest.py
+import argparse
+import importlib.util
 import os
-from pathlib import Path
+import shlex
+import time
 from datetime import date
-import pandas as pd
-from google.cloud import bigquery
-from dotenv import dotenv_values
-from yfpy.query import YahooFantasySportsQuery
+from pathlib import Path
+
 import google.auth
+import pandas as pd
+from google.api_core.exceptions import NotFound
+from google.cloud import bigquery
+from requests.exceptions import HTTPError
+from yfpy.exceptions import YahooFantasySportsDataNotFound
+from yfpy.models import Player
+from yfpy.query import YahooFantasySportsQuery
 
 PROJECT = "fantasy-survivor-app"
 DATASET = "nba_data"
 TABLE   = f"{PROJECT}.{DATASET}.player_ownership"
 BQ_LOCATION = "northamerica-northeast1"  # set to your dataset location
+
+RATE_LIMIT_DELAY_SECONDS = float(os.getenv("YAHOO_API_DELAY_SECONDS", "0.5"))
+RATE_LIMIT_MAX_RETRIES = int(os.getenv("YAHOO_API_MAX_RETRIES", "3"))
+RATE_LIMIT_BACKOFF = float(os.getenv("YAHOO_API_BACKOFF", "2.0"))
+PERCENT_OWNED_BATCH_SIZE = int(os.getenv("YAHOO_PERCENT_BATCH_SIZE", "25"))
 
 # ---------- ENV (load root .env explicitly) ----------
 # ROOT_ENV = Path(__file__).resolve().parents[1] / ".env"
@@ -25,40 +38,103 @@ BQ_LOCATION = "northamerica-northeast1"  # set to your dataset location
 # GAME_ID = os.environ.get("YAHOO_GAME_ID")  # strongly recommended to avoid prompts
 
 ROOT_ENV = Path(__file__).resolve().parents[1] / ".env"
-if ROOT_ENV.exists():
-    try:
-        from dotenv import dotenv_values
-        os.environ.update({k: v for k, v in dotenv_values(ROOT_ENV).items() if v})
-        print(f"[env] loaded {ROOT_ENV}")
-    except Exception:
-        pass  # ignore if python-dotenv not installed in the image
+
+
+def _parse_env_file(path: Path) -> dict[str, str]:
+    """Minimal .env parser that handles KEY=VALUE and quoted strings."""
+
+    values: dict[str, str] = {}
+    for raw_line in path.read_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+
+        if not key:
+            continue
+
+        if value and value[0] == value[-1] and value[0] in {'"', "'"}:
+            parsed = value[1:-1]
+        else:
+            try:
+                parsed = shlex.split(value, posix=True)[0] if value else ""
+            except ValueError:
+                parsed = value
+
+        if parsed:
+            values[key] = parsed
+
+    return values
+
+
+def _load_root_env(env_path: Path) -> None:
+    if not env_path.exists():
+        return
+
+    values: dict[str, str] = {}
+
+    spec = importlib.util.find_spec("dotenv")
+    if spec is not None:
+        from dotenv import dotenv_values  # type: ignore  # imported only when available
+
+        loaded = {k: v for k, v in dotenv_values(env_path).items() if v}
+        if loaded:
+            values.update(loaded)
+
+    if not values:
+        values.update(_parse_env_file(env_path))
+
+    if values:
+        os.environ.update(values)
+        print(f"[env] loaded {env_path}")
+
+
+_load_root_env(ROOT_ENV)
 
 # Required in any environment (Cloud Run: provided via --set-env-vars)
 REQ = [
     "YAHOO_CONSUMER_KEY",
     "YAHOO_CONSUMER_SECRET",
-    "YAHOO_ACCESS_TOKEN",
-    "YAHOO_REFRESH_TOKEN",
-    # optional but nice to have:
-    # "YAHOO_TOKEN_TYPE", "YAHOO_TOKEN_EXPIRES_AT"
+    "YAHOO_LEAGUE_ID",
 ]
 missing = [k for k in REQ if not os.getenv(k)]
 if missing:
     raise SystemExit(f"Missing required env vars: {missing}")
 
-TMP_ENV = Path("/tmp/yahoo_tokens.env")
-lines = [
-    f"YAHOO_CONSUMER_KEY={os.environ['YAHOO_CONSUMER_KEY']}",
-    f"YAHOO_CONSUMER_SECRET={os.environ['YAHOO_CONSUMER_SECRET']}",
-    f"YAHOO_ACCESS_TOKEN={os.environ['YAHOO_ACCESS_TOKEN']}",
-    f"YAHOO_REFRESH_TOKEN={os.environ['YAHOO_REFRESH_TOKEN']}",
-    f"YAHOO_LEAGUE_ID={os.environ['YAHOO_LEAGUE_ID']}",
-    f"YAHOO_GAME_ID={os.getenv('YAHOO_GAME_ID','')}",
-]
-# optional extras if you have them
-if os.getenv("YAHOO_TOKEN_TYPE"):      lines.append(f"YAHOO_TOKEN_TYPE={os.environ['YAHOO_TOKEN_TYPE']}")
-# if os.getenv("YAHOO_TOKEN_EXPIRES_AT"): lines.append(f"YAHOO_TOKEN_EXPIRES_AT={os.environ['YAHOO_TOKEN_EXPIRES_AT']}")
-TMP_ENV.write_text("\n".join(lines))
+TOKEN_ENV_VAR = "YAHOO_OAUTH2_JSON"
+TOKEN_PATH_ENV_VAR = "YAHOO_OAUTH2_JSON_PATH"
+
+
+def _resolve_token_path() -> Path:
+    """Return the Yahoo OAuth token JSON path, writing env secrets when provided."""
+
+    token_raw = os.getenv(TOKEN_ENV_VAR)
+    if token_raw:
+        tmp_path = Path("/tmp/yahoo_oauth2.json")
+        tmp_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path.write_text(token_raw)
+        return tmp_path
+
+    explicit = os.getenv(TOKEN_PATH_ENV_VAR)
+    if explicit:
+        explicit_path = Path(explicit)
+        if explicit_path.exists():
+            return explicit_path
+
+    for candidate in (
+        Path("./yahoo_oauth2.json"),
+        Path.home() / ".credentials" / "yahoo_oauth2.json",
+    ):
+        if candidate.exists():
+            return candidate
+
+    raise RuntimeError(
+        "No Yahoo OAuth token JSON found. Set YAHOO_OAUTH2_JSON, "
+        "YAHOO_OAUTH2_JSON_PATH, or place yahoo_oauth2.json in a default location."
+    )
 
 # ---------- Helpers ----------
 def _bq() -> bigquery.Client:
@@ -83,12 +159,15 @@ def _player_dim_map(client: bigquery.Client) -> pd.DataFrame:
     return df[["name_lc", "player_id", "player_name"]]
 
 def _yahoo_query():
+    token_path = Path(_resolve_token_path())
+    env_dir = token_path if token_path.is_dir() else token_path.parent
     kwargs = dict(
         league_id=os.environ["YAHOO_LEAGUE_ID"],
-        game_code="nba",
+        game_code=os.getenv("YAHOO_GAME_CODE", "nba"),
         yahoo_consumer_key=os.environ["YAHOO_CONSUMER_KEY"],
         yahoo_consumer_secret=os.environ["YAHOO_CONSUMER_SECRET"],
-        env_file_location=TMP_ENV,  # writable in Cloud Run
+        yahoo_access_token_json=token_path.read_text(),
+        env_file_location=env_dir,
     )
     gid = os.getenv("YAHOO_GAME_ID")
     if gid:
@@ -98,80 +177,288 @@ def _yahoo_query():
 def _name_of(p) -> str | None:
     return (getattr(getattr(p, "name", None), "full", None) or getattr(p, "full_name", None))
 
-def _pct_value(po) -> float | None:
-    # Accept YFPY PercentOwned or wrapped forms; return float 0..100
-    if po is None:
+def _extract_percent_value(po_obj) -> float | None:
+    """Return float percent from Yahoo payloads that expose a ``value`` field."""
+
+    if po_obj is None:
         return None
-    # PercentOwned directly
-    if hasattr(po, "value"):
+
+    val = None
+    if isinstance(po_obj, dict):
+        val = po_obj.get("value")
+    else:
+        val = getattr(po_obj, "value", None)
+        if val is None and hasattr(po_obj, "get"):
+            try:
+                val = po_obj.get("value")
+            except Exception:
+                pass
+
+    try:
+        return float(val) if val is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_player_payload(item):
+    """Coerce Yahoo player payload wrappers to the raw dict Player expects."""
+
+    if item is None:
+        return None
+
+    # Objects coming from yfpy responses sometimes expose a ``player`` attr.
+    if hasattr(item, "player") and getattr(item, "player") is not None:
+        item = getattr(item, "player")
+
+    # Dict wrapper: {"player": {...}}
+    if isinstance(item, dict) and "player" in item:
+        item = item["player"]
+
+    # Lists can look like ["player", {...}] or [{...}]
+    if isinstance(item, list):
+        if len(item) == 2 and isinstance(item[1], dict):
+            item = item[1]
+        elif item and isinstance(item[0], dict):
+            item = item[0]
+
+    return item
+
+
+def _player_from_payload(item) -> Player | None:
+    """Return a Player instance from a raw Yahoo payload item."""
+
+    normalized = _normalize_player_payload(item)
+    if normalized is None:
+        return None
+
+    if isinstance(normalized, Player):
+        return normalized
+
+    if hasattr(normalized, "as_dict"):
         try:
-            return float(po.value)
-        except (TypeError, ValueError):
+            normalized = normalized.as_dict()
+        except Exception:
             return None
-    # PlayerOwnership model with .percent_owned
-    if hasattr(po, "percent_owned") and hasattr(po.percent_owned, "value"):
+
+    try:
+        return Player(normalized)
+    except Exception:
+        return None
+
+
+def _call_with_retries(fn, *args, **kwargs):
+    """Call Yahoo endpoints with basic retry/backoff to survive rate limiting."""
+
+    delay = RATE_LIMIT_DELAY_SECONDS
+    for attempt in range(1, RATE_LIMIT_MAX_RETRIES + 1):
         try:
-            return float(po.percent_owned.value)
-        except (TypeError, ValueError):
-            return None
-    # plain number/string fallback
-    if isinstance(po, (int, float)):
-        return float(po)
-    if isinstance(po, str):
-        try:
-            return float(po.strip().replace("%", ""))
-        except ValueError:
-            return None
+            result = fn(*args, **kwargs)
+        except HTTPError as err:
+            if attempt == RATE_LIMIT_MAX_RETRIES:
+                raise
+
+            wait = delay * (RATE_LIMIT_BACKOFF ** (attempt - 1))
+            print(f"[Yahoo] rate limited ({err}); retrying in {wait:.2f}s (attempt {attempt}/{RATE_LIMIT_MAX_RETRIES})")
+            time.sleep(wait)
+            continue
+
+        if RATE_LIMIT_DELAY_SECONDS > 0:
+            time.sleep(RATE_LIMIT_DELAY_SECONDS)
+        return result
+
     return None
 
-def fetch_yahoo_roster_df(q: YahooFantasySportsQuery) -> pd.DataFrame:
-    """
-    Preferred: per-player universal PercentOwned via get_player_percent_owned_by_week(..., 'current').
-    Fallback: league payload if needed.
-    """
-    players = q.get_league_players()
+
+def _rows_exist_for_snapshot(client: bigquery.Client, snapshot_date: date) -> bool:
+    """Return True when the ownership table already has rows for ``snapshot_date``."""
+
+    sql = f"SELECT 1 FROM `{TABLE}` WHERE snapshot_date = @snapshot LIMIT 1"
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter("snapshot", "DATE", snapshot_date),
+        ]
+    )
+
+    try:
+        job = client.query(sql, job_config=job_config, location=BQ_LOCATION)
+    except NotFound:
+        return False
+
+    for _ in job.result():
+        return True
+    return False
+
+def _iter_player_pool(
+    q: YahooFantasySportsQuery,
+    statuses: list[str | None] | None = None,
+    batch_size: int = 25,
+    league_key: str | None = None,
+):
+    """Yield Player models across rostered + available pools for the league."""
+
+    statuses = statuses or [None, "A", "FA", "W"]
+    seen_keys: set[str] = set()
+    league_key = league_key or q.get_league_key()
+
+    for status in statuses:
+        start = 0
+
+        while True:
+            clause_parts = []
+            if status:
+                clause_parts.append(f"status={status}")
+            clause_parts.append(f"start={start}")
+            clause_parts.append(f"count={batch_size}")
+            url = (
+                f"https://fantasysports.yahooapis.com/fantasy/v2/league/{league_key}/players;"
+                f"{';'.join(clause_parts)}"
+            )
+
+            try:
+                payload = _call_with_retries(q.query, url, ["league", "players"], None)
+            except YahooFantasySportsDataNotFound:
+                break
+
+            if not payload:
+                break
+
+            players = payload if isinstance(payload, list) else [payload]
+            batch_count = len(players)
+
+            for raw_player in players:
+                player = _player_from_payload(raw_player)
+                if player is None:
+                    continue
+                pkey = getattr(player, "player_key", None)
+                if pkey and pkey in seen_keys:
+                    continue
+                if pkey:
+                    seen_keys.add(pkey)
+                yield player
+
+            if batch_count < batch_size:
+                break
+
+            start += batch_count
+
+
+def _percent_owned_batch_values(
+    q: YahooFantasySportsQuery,
+    league_key: str,
+    player_keys: list[str],
+    week: int | str = "current",
+) -> dict[str, float | None]:
+    if not player_keys:
+        return {}
+
+    joined_keys = ",".join(player_keys)
+    url = (
+        f"https://fantasysports.yahooapis.com/fantasy/v2/league/{league_key}/players;"
+        f"player_keys={joined_keys}/percent_owned;type=week;week={week}"
+    )
+
+    try:
+        payload = _call_with_retries(q.query, url, ["league", "players"], None)
+    except YahooFantasySportsDataNotFound:
+        return {}
+
+    if not payload:
+        return {}
+
+    players = payload if isinstance(payload, list) else [payload]
+    results: dict[str, float | None] = {}
+    for raw_player in players:
+        player = _player_from_payload(raw_player)
+        if player is None:
+            continue
+        key = getattr(player, "player_key", None)
+        if not key:
+            continue
+        results[key] = _extract_percent_value(getattr(player, "percent_owned", None))
+
+    return results
+
+
+def fetch_yahoo_roster_df(
+    q: YahooFantasySportsQuery,
+    *,
+    week: int | str = "current",
+) -> pd.DataFrame:
+    """Pull Yahoo player pool and source roster_pct directly from percent_owned.value."""
+
+    league_key = q.get_league_key()
+    players = list(_iter_player_pool(q, league_key=league_key))
     total = len(players)
-    print(f"[Yahoo] league roster fetched: {total} players")
+    print(f"[Yahoo] player pool fetched: {total} players")
+
+    keys = [getattr(p, "player_key", None) for p in players if getattr(p, "player_key", None)]
+    unique_keys: list[str] = []
+    seen_keys: set[str] = set()
+    for key in keys:
+        if key not in seen_keys:
+            seen_keys.add(key)
+            unique_keys.append(key)
+
+    percent_owned_map: dict[str, float | None] = {}
+    for start in range(0, len(unique_keys), PERCENT_OWNED_BATCH_SIZE):
+        batch = unique_keys[start : start + PERCENT_OWNED_BATCH_SIZE]
+        batch_map = _percent_owned_batch_values(q, league_key, batch, week=week)
+        percent_owned_map.update(batch_map)
+        if len(unique_keys) and ((start + len(batch)) % 100 == 0 or (start + len(batch)) == len(unique_keys)):
+            processed = start + len(batch)
+            pct = round(processed * 100 / len(unique_keys), 1)
+            print(f"[Yahoo] percent-owned fetched for {processed}/{len(unique_keys)} keys ({pct}%)")
 
     rows = []
     for i, p in enumerate(players, 1):
-        if i % 100 == 0 or i == total:
-            print(f"[Yahoo] processed {i}/{total} ({round(i*100/total,1)}%)")
+        if total and (i % 100 == 0 or i == total):
+            print(f"[Yahoo] processed {i}/{total} ({round(i * 100 / total, 1)}%)")
 
-        name = _name_of(p)
+        key = getattr(p, "player_key", None)
+        name = (getattr(p, "full_name", None) or _name_of(p) or "").strip()
         if not name:
             continue
 
-        val = None
-        # 1) universal percent-owned (weekly coverage, 'current')
-        try:
-            ply = q.get_player_percent_owned_by_week(p.player_key, "current")  # returns Player model
-            po = getattr(ply, "percent_owned", None)
-            val = _pct_value(po)
-        except Exception as e:
-            # keep val None and try fallbacks
-            pass
+        val = percent_owned_map.get(key) if key else None
 
-        # 2) fallback to league payload if universal missing
-        if val is None:
-            league_po = getattr(p, "percent_owned", None) or getattr(getattr(p, "ownership", None), "percent_owned", None)
-            val = _pct_value(league_po)
+        rows.append({"player_key": key, "player_name": name, "roster_pct": val})
 
-        rows.append({"player_name": name, "roster_pct": val})
+    df = pd.DataFrame(rows).dropna(subset=["player_name"])
+    if "roster_pct" in df.columns:
+        df["roster_pct"] = pd.to_numeric(df["roster_pct"], errors="coerce")
+    if df.empty:
+        return df
 
-    df = pd.DataFrame(rows, columns=["player_name", "roster_pct"]).dropna(subset=["player_name"])
-    if not df.empty:
-        df["name_lc"] = df["player_name"].str.strip().str.lower()
-        df = (df.sort_values(["name_lc", "roster_pct"], ascending=[True, False])
-                .drop_duplicates(subset=["name_lc"], keep="first"))
+    if "player_key" in df.columns and df["player_key"].notna().any():
+        df = (
+            df.sort_values(["player_key", "roster_pct"], ascending=[True, False])
+            .drop_duplicates(subset=["player_key"], keep="first")
+        )
+
+    df["name_lc"] = df["player_name"].str.strip().str.lower()
+    df = (
+        df.sort_values(["name_lc", "roster_pct"], ascending=[True, False])
+        .drop_duplicates(subset=["name_lc"], keep="first")
+    )
     return df
 
-def run(snapshot: date | None = None) -> pd.DataFrame:
+def run(
+    snapshot: date | None = None,
+    *,
+    week: int | str | None = None,
+    force: bool = False,
+) -> pd.DataFrame:
     snapshot = snapshot or date.today()
     client = _bq()
     q = _yahoo_query()
 
-    yahoo_df = fetch_yahoo_roster_df(q)
+    if not force and _rows_exist_for_snapshot(client, snapshot):
+        print(f"[BQ] {TABLE} already has rows for {snapshot}; skipping ingestion.")
+        return pd.DataFrame()
+
+    week_value: int | str = week if week is not None else "current"
+
+    yahoo_df = fetch_yahoo_roster_df(q, week=week_value)
     if yahoo_df.empty:
         print("[Yahoo] no rows; aborting")
         return yahoo_df
@@ -202,10 +489,50 @@ def run(snapshot: date | None = None) -> pd.DataFrame:
         location=BQ_LOCATION,
     )
     job.result()
-    print(f"[BQ] done. {len(load_df)} rows → {TABLE} ({snapshot})")
+    print(f"[BQ] done. {len(load_df)} rows → {TABLE} ({snapshot}, week={week_value})")
     return merged
 
 print("[AUTH] project:", google.auth.default()[1])
 
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Load Yahoo percent-owned data into BigQuery.")
+    parser.add_argument(
+        "--snapshot-date",
+        dest="snapshot_date",
+        help="Snapshot date (YYYY-MM-DD). Defaults to today when omitted.",
+    )
+    parser.add_argument(
+        "--week",
+        dest="week",
+        help=(
+            "Yahoo percent-owned week identifier (int week number or 'current')."
+            " Defaults to 'current'."
+        ),
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Load data even if rows already exist for the snapshot date.",
+    )
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    run()
+    args = _parse_args()
+
+    snapshot_value: date | None = None
+    if args.snapshot_date:
+        try:
+            snapshot_value = date.fromisoformat(args.snapshot_date)
+        except ValueError as exc:
+            raise SystemExit(f"Invalid --snapshot-date value: {args.snapshot_date}") from exc
+
+    week_arg: int | str | None = None
+    if args.week:
+        week_arg = args.week
+        try:
+            week_arg = int(args.week)
+        except ValueError:
+            week_arg = args.week
+
+    run(snapshot=snapshot_value, week=week_arg, force=args.force)
