@@ -5,7 +5,7 @@ import argparse
 import importlib
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Iterable
 
@@ -104,9 +104,9 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--date",
-        required=True,
+        default=None,
         type=lambda value: datetime.strptime(value, "%Y-%m-%d"),
-        help="Target date in YYYY-MM-DD format.",
+        help="Target date in YYYY-MM-DD format. Defaults to yesterday when omitted.",
     )
     parser.add_argument(
         "--season",
@@ -175,9 +175,34 @@ def _display_frame(df: pd.DataFrame, max_rows: int | None = None) -> None:
 
 def main() -> int:
     args = _parse_args()
-    target_date: datetime = args.date
+    if args.date is not None:
+        target_date: datetime = args.date
+    else:
+        target_date = (datetime.utcnow() - timedelta(days=1)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
 
     season_value = args.season or _season_from_date(target_date)
+
+    client = bigquery.Client(project=args.project)
+    partition_date = target_date.date()
+
+    try:
+        rows_exist = _ingest_module._rows_exist_for_date(
+            args.table, partition_date, client=client
+        )
+    except Exception as exc:  # pragma: no cover - defensive logging
+        print(
+            "Unable to determine if rows already exist for",
+            f"{partition_date}: {exc}. Proceeding with ingestion.",
+        )
+        rows_exist = False
+
+    if rows_exist:
+        print(
+            f"{args.table} already has rows for {partition_date}; skipping ingestion."
+        )
+        return 0
 
     if args.game_ids:
         game_ids = [str(gid) for gid in args.game_ids]
@@ -205,7 +230,6 @@ def main() -> int:
 
     mirror_table = None if args.skip_mirror else args.mirror_table
 
-    client = bigquery.Client(project=args.project)
     load_into_bigquery_tables(
         df,
         client=client,
