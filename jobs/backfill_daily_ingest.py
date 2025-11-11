@@ -184,6 +184,26 @@ def main() -> int:
 
     season_value = args.season or _season_from_date(target_date)
 
+    client = bigquery.Client(project=args.project)
+    partition_date = target_date.date()
+
+    try:
+        rows_exist = _ingest_module._rows_exist_for_date(
+            args.table, partition_date, client=client
+        )
+    except Exception as exc:  # pragma: no cover - defensive logging
+        print(
+            "Unable to determine if rows already exist for",
+            f"{partition_date}: {exc}. Proceeding with ingestion.",
+        )
+        rows_exist = False
+
+    if rows_exist:
+        print(
+            f"{args.table} already has rows for {partition_date}; skipping ingestion."
+        )
+        return 0
+
     if args.game_ids:
         game_ids = [str(gid) for gid in args.game_ids]
     else:
@@ -210,7 +230,6 @@ def main() -> int:
 
     mirror_table = None if args.skip_mirror else args.mirror_table
 
-    client = bigquery.Client(project=args.project)
     load_into_bigquery_tables(
         df,
         client=client,

@@ -18,7 +18,7 @@ from yfpy.query import YahooFantasySportsQuery
 
 PROJECT = "fantasy-survivor-app"
 DATASET = "nba_data"
-TABLE   = f"{PROJECT}.{DATASET}.player_ownership"
+TABLE   = f"{PROJECT}.{DATASET}.player_ownership_p"
 BQ_LOCATION = "northamerica-northeast1"  # set to your dataset location
 
 RATE_LIMIT_DELAY_SECONDS = float(os.getenv("YAHOO_API_DELAY_SECONDS", "0.5"))
