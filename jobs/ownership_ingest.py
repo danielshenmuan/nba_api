@@ -2,6 +2,7 @@
 import argparse
 import importlib.util
 import os
+import pathlib
 import shlex
 import time
 from datetime import date
@@ -11,6 +12,7 @@ import google.auth
 import pandas as pd
 from google.api_core.exceptions import NotFound
 from google.cloud import bigquery
+from pandas._libs import json
 from requests.exceptions import HTTPError
 from yfpy.exceptions import YahooFantasySportsDataNotFound
 from yfpy.models import Player
@@ -158,20 +160,44 @@ def _player_dim_map(client: bigquery.Client) -> pd.DataFrame:
     df["name_lc"] = df["player_name"].str.strip().str.lower()
     return df[["name_lc", "player_id", "player_name"]]
 
+def _require(name: str) -> str:
+    v = os.getenv(name)
+    if not v:
+        raise RuntimeError(f"Missing required env var: {name}")
+    return v
+
 def _yahoo_query():
-    token_path = Path(_resolve_token_path())
-    env_dir = token_path if token_path.is_dir() else token_path.parent
+    # 1) Grab secrets from env (Cloud Run maps these from Secret Manager)
+    ck = _require("YAHOO_CONSUMER_KEY")
+    cs = _require("YAHOO_CONSUMER_SECRET")
+    league_id = _require("YAHOO_LEAGUE_ID")
+
+    # 2) Token JSON (from Secret Manager) -> dict
+    token_raw = _require("YAHOO_OAUTH2_JSON")
+    token = json.loads(token_raw)          # must contain refresh_token
+
+    # 3) Write a combined file that yahoo-oauth expects
+    oauth_file = Path("/tmp/yahoo_secrets.json")
+    oauth_file.write_text(json.dumps({
+        "consumer_key": ck,
+        "consumer_secret": cs,
+        # include token fields you have; refresh_token is crucial
+        **token
+    }, indent=2))
+
+    # 4) Build kwargs for yfpy; pass from_file so OAuth2 loads headlessly
     kwargs = dict(
-        league_id=os.environ["YAHOO_LEAGUE_ID"],
+        league_id=league_id,
         game_code=os.getenv("YAHOO_GAME_CODE", "nba"),
-        yahoo_consumer_key=os.environ["YAHOO_CONSUMER_KEY"],
-        yahoo_consumer_secret=os.environ["YAHOO_CONSUMER_SECRET"],
-        yahoo_access_token_json=token_path.read_text(),
-        env_file_location=env_dir,
+        # NOTE: keep these too (harmless if also present in file)
+        yahoo_consumer_key=ck,
+        yahoo_consumer_secret=cs,
+        from_file=str(oauth_file),   # <<< key line: avoids interactive prompt
     )
     gid = os.getenv("YAHOO_GAME_ID")
     if gid:
         kwargs["game_id"] = int(gid)
+
     return YahooFantasySportsQuery(**kwargs)
 
 def _name_of(p) -> str | None:
