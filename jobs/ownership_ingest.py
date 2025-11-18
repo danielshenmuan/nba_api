@@ -2,25 +2,24 @@
 import argparse
 import importlib.util
 import os
-import pathlib
 import shlex
 import time
 from datetime import date
 from pathlib import Path
-
 import google.auth
+import json
 import pandas as pd
 from google.api_core.exceptions import NotFound
 from google.cloud import bigquery
-from pandas._libs import json
 from requests.exceptions import HTTPError
 from yfpy.exceptions import YahooFantasySportsDataNotFound
 from yfpy.models import Player
 from yfpy.query import YahooFantasySportsQuery
 
+
 PROJECT = "fantasy-survivor-app"
 DATASET = "nba_data"
-TABLE   = f"{PROJECT}.{DATASET}.player_ownership_p"
+TABLE = f"{PROJECT}.{DATASET}.player_ownership"
 BQ_LOCATION = "northamerica-northeast1"  # set to your dataset location
 
 RATE_LIMIT_DELAY_SECONDS = float(os.getenv("YAHOO_API_DELAY_SECONDS", "0.5"))
@@ -73,9 +72,13 @@ def _parse_env_file(path: Path) -> dict[str, str]:
 
 
 def _load_root_env(env_path: Path) -> None:
+    print(f"[env] Checking for .env file at: {env_path}")
+
     if not env_path.exists():
+        print(f"[env] .env file not found (expected in Cloud Run, normal in production)")
         return
 
+    print(f"[env] .env file found, loading...")
     values: dict[str, str] = {}
 
     spec = importlib.util.find_spec("dotenv")
@@ -85,13 +88,15 @@ def _load_root_env(env_path: Path) -> None:
         loaded = {k: v for k, v in dotenv_values(env_path).items() if v}
         if loaded:
             values.update(loaded)
+            print(f"[env] Loaded {len(loaded)} values using python-dotenv")
 
     if not values:
         values.update(_parse_env_file(env_path))
+        print(f"[env] Loaded {len(values)} values using fallback parser")
 
     if values:
         os.environ.update(values)
-        print(f"[env] loaded {env_path}")
+        print(f"[env] ✓ Successfully loaded {env_path}")
 
 
 _load_root_env(ROOT_ENV)
@@ -102,6 +107,16 @@ REQ = [
     "YAHOO_CONSUMER_SECRET",
     "YAHOO_LEAGUE_ID",
 ]
+
+# Diagnostic logging for Cloud Run
+print("[env-check] Validating required environment variables...")
+for key in REQ:
+    val = os.getenv(key)
+    if val:
+        print(f"[env-check] ✓ {key}: present (length={len(val)})")
+    else:
+        print(f"[env-check] ✗ {key}: MISSING")
+
 missing = [k for k in REQ if not os.getenv(k)]
 if missing:
     raise SystemExit(f"Missing required env vars: {missing}")
@@ -110,37 +125,10 @@ TOKEN_ENV_VAR = "YAHOO_OAUTH2_JSON"
 TOKEN_PATH_ENV_VAR = "YAHOO_OAUTH2_JSON_PATH"
 
 
-def _resolve_token_path() -> Path:
-    """Return the Yahoo OAuth token JSON path, writing env secrets when provided."""
-
-    token_raw = os.getenv(TOKEN_ENV_VAR)
-    if token_raw:
-        tmp_path = Path("/tmp/yahoo_oauth2.json")
-        tmp_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path.write_text(token_raw)
-        return tmp_path
-
-    explicit = os.getenv(TOKEN_PATH_ENV_VAR)
-    if explicit:
-        explicit_path = Path(explicit)
-        if explicit_path.exists():
-            return explicit_path
-
-    for candidate in (
-        Path("./yahoo_oauth2.json"),
-        Path.home() / ".credentials" / "yahoo_oauth2.json",
-    ):
-        if candidate.exists():
-            return candidate
-
-    raise RuntimeError(
-        "No Yahoo OAuth token JSON found. Set YAHOO_OAUTH2_JSON, "
-        "YAHOO_OAUTH2_JSON_PATH, or place yahoo_oauth2.json in a default location."
-    )
-
 # ---------- Helpers ----------
 def _bq() -> bigquery.Client:
     return bigquery.Client(project=PROJECT, location=BQ_LOCATION)
+
 
 def _player_dim_map(client: bigquery.Client) -> pd.DataFrame:
     # latest season name->id from your fact table (may miss brand-new players)
@@ -160,48 +148,65 @@ def _player_dim_map(client: bigquery.Client) -> pd.DataFrame:
     df["name_lc"] = df["player_name"].str.strip().str.lower()
     return df[["name_lc", "player_id", "player_name"]]
 
+
 def _require(name: str) -> str:
     v = os.getenv(name)
     if not v:
         raise RuntimeError(f"Missing required env var: {name}")
-    return v
+    return v.replace("\n", "")
+
 
 def _yahoo_query():
+    print("[yahoo-auth] Initializing Yahoo Fantasy Sports Query...")
+
     # 1) Grab secrets from env (Cloud Run maps these from Secret Manager)
+    print("[yahoo-auth] Loading credentials from environment...")
     ck = _require("YAHOO_CONSUMER_KEY")
     cs = _require("YAHOO_CONSUMER_SECRET")
     league_id = _require("YAHOO_LEAGUE_ID")
+    print(f"[yahoo-auth] ✓ Consumer key length: {len(ck)}")
+    print(f"[yahoo-auth] ✓ Consumer secret length: {len(cs)}")
+    print(f"[yahoo-auth] ✓ League ID: {league_id}")
 
     # 2) Token JSON (from Secret Manager) -> dict
+    print("[yahoo-auth] Loading OAuth token JSON...")
     token_raw = _require("YAHOO_OAUTH2_JSON")
-    token = json.loads(token_raw)          # must contain refresh_token
-
-    # 3) Write a combined file that yahoo-oauth expects
-    oauth_file = Path("/tmp/yahoo_secrets.json")
-    oauth_file.write_text(json.dumps({
-        "consumer_key": ck,
-        "consumer_secret": cs,
-        # include token fields you have; refresh_token is crucial
-        **token
-    }, indent=2))
+    token = json.loads(token_raw)  # must contain refresh_token
+    print(f"[yahoo-auth] Token: {token}")
+    print(f"[yahoo-auth] ✓ Token JSON parsed successfully")
+    print(f"[yahoo-auth] ✓ Token has refresh_token: {'refresh_token' in token}")
+    print(f"[yahoo-auth] ✓ Token has access_token: {'access_token' in token}")
 
     # 4) Build kwargs for yfpy; pass from_file so OAuth2 loads headlessly
+    game_code = os.getenv("YAHOO_GAME_CODE", "nba")
+    gid = os.getenv("YAHOO_GAME_ID")
+    print(f"[yahoo-auth] Game code: {game_code}")
+    print(f"[yahoo-auth] Game ID: {gid if gid else 'not set (will auto-detect)'}")
+
+    yahoo_access_token_json = {
+        "consumer_key": ck,
+        "consumer_secret": cs,
+        "guid": "None",
+        # include token fields you have; refresh_token is crucial
+        **token,
+    }
+
     kwargs = dict(
         league_id=league_id,
-        game_code=os.getenv("YAHOO_GAME_CODE", "nba"),
-        # NOTE: keep these too (harmless if also present in file)
-        yahoo_consumer_key=ck,
-        yahoo_consumer_secret=cs,
-        from_file=str(oauth_file),   # <<< key line: avoids interactive prompt
+        game_code=game_code,
+        yahoo_access_token_json=yahoo_access_token_json,
+        env_var_fallback=True,
     )
-    gid = os.getenv("YAHOO_GAME_ID")
     if gid:
         kwargs["game_id"] = int(gid)
 
+    print("[yahoo-auth] ✓ Creating YahooFantasySportsQuery instance...")
     return YahooFantasySportsQuery(**kwargs)
 
+
 def _name_of(p) -> str | None:
-    return (getattr(getattr(p, "name", None), "full", None) or getattr(p, "full_name", None))
+    return getattr(getattr(p, "name", None), "full", None) or getattr(p, "full_name", None)
+
 
 def _extract_percent_value(po_obj) -> float | None:
     """Return float percent from Yahoo payloads that expose a ``value`` field."""
@@ -284,7 +289,9 @@ def _call_with_retries(fn, *args, **kwargs):
                 raise
 
             wait = delay * (RATE_LIMIT_BACKOFF ** (attempt - 1))
-            print(f"[Yahoo] rate limited ({err}); retrying in {wait:.2f}s (attempt {attempt}/{RATE_LIMIT_MAX_RETRIES})")
+            print(
+                f"[Yahoo] rate limited ({err}); retrying in {wait:.2f}s (attempt {attempt}/{RATE_LIMIT_MAX_RETRIES})"
+            )
             time.sleep(wait)
             continue
 
@@ -313,6 +320,7 @@ def _rows_exist_for_snapshot(client: bigquery.Client, snapshot_date: date) -> bo
     for _ in job.result():
         return True
     return False
+
 
 def _iter_player_pool(
     q: YahooFantasySportsQuery,
@@ -430,7 +438,9 @@ def fetch_yahoo_roster_df(
         batch = unique_keys[start : start + PERCENT_OWNED_BATCH_SIZE]
         batch_map = _percent_owned_batch_values(q, league_key, batch, week=week)
         percent_owned_map.update(batch_map)
-        if len(unique_keys) and ((start + len(batch)) % 100 == 0 or (start + len(batch)) == len(unique_keys)):
+        if len(unique_keys) and (
+            (start + len(batch)) % 100 == 0 or (start + len(batch)) == len(unique_keys)
+        ):
             processed = start + len(batch)
             pct = round(processed * 100 / len(unique_keys), 1)
             print(f"[Yahoo] percent-owned fetched for {processed}/{len(unique_keys)} keys ({pct}%)")
@@ -456,17 +466,16 @@ def fetch_yahoo_roster_df(
         return df
 
     if "player_key" in df.columns and df["player_key"].notna().any():
-        df = (
-            df.sort_values(["player_key", "roster_pct"], ascending=[True, False])
-            .drop_duplicates(subset=["player_key"], keep="first")
+        df = df.sort_values(["player_key", "roster_pct"], ascending=[True, False]).drop_duplicates(
+            subset=["player_key"], keep="first"
         )
 
     df["name_lc"] = df["player_name"].str.strip().str.lower()
-    df = (
-        df.sort_values(["name_lc", "roster_pct"], ascending=[True, False])
-        .drop_duplicates(subset=["name_lc"], keep="first")
+    df = df.sort_values(["name_lc", "roster_pct"], ascending=[True, False]).drop_duplicates(
+        subset=["name_lc"], keep="first"
     )
     return df
+
 
 def run(
     snapshot: date | None = None,
@@ -475,6 +484,12 @@ def run(
     force: bool = False,
 ) -> pd.DataFrame:
     snapshot = snapshot or date.today()
+    print(f"\n[run] ========== Starting ownership ingestion ==========")
+    print(f"[run] Snapshot date: {snapshot}")
+    print(f"[run] Week: {week if week is not None else 'current'}")
+    print(f"[run] Force: {force}")
+    print(f"[run] ====================================================\n")
+
     client = _bq()
     q = _yahoo_query()
 
@@ -490,7 +505,9 @@ def run(
         return yahoo_df
 
     dim = _player_dim_map(client)
-    merged = yahoo_df.merge(dim, on="name_lc", how="left", suffixes=("_yahoo", "_dim")).drop(columns=["name_lc"])
+    merged = yahoo_df.merge(dim, on="name_lc", how="left", suffixes=("_yahoo", "_dim")).drop(
+        columns=["name_lc"]
+    )
 
     # unify player_name
     if "player_name_yahoo" in merged.columns and "player_name_dim" in merged.columns:
@@ -518,7 +535,17 @@ def run(
     print(f"[BQ] done. {len(load_df)} rows → {TABLE} ({snapshot}, week={week_value})")
     return merged
 
-print("[AUTH] project:", google.auth.default()[1])
+
+print("\n[AUTH] Checking Google Cloud authentication...")
+try:
+    credentials, project = google.auth.default()
+    print(f"[AUTH] ✓ Default credentials found")
+    print(f"[AUTH] ✓ Project: {project}")
+    print(f"[AUTH] ✓ Credentials type: {type(credentials).__name__}")
+except Exception as e:
+    print(f"[AUTH] ✗ Failed to load default credentials: {e}")
+    print(f"[AUTH] This is expected locally, but CRITICAL in Cloud Run")
+
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Load Yahoo percent-owned data into BigQuery.")
