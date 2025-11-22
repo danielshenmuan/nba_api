@@ -1,0 +1,136 @@
+2025-11-12 01:00:32.038 - ERROR - query.py - yfpy.query:541 - No data found when attempting extraction from fields: ['league', 'players']
+/Users/danielshenmuan/PycharmProjects/nba_api/.venv/lib/python3.13/site-packages/google/cloud/bigquery/table.py:1994: UserWarning: BigQuery Storage module not found, fetch data with the REST endpoint instead.
+  warnings.warn(
+[env] loaded /Users/danielshenmuan/PycharmProjects/nba_api/.env
+[AUTH] project: None
+[Yahoo] player pool fetched: 700 players
+[Yahoo] percent-owned fetched for 100/700 keys (14.3%)
+[Yahoo] percent-owned fetched for 200/700 keys (28.6%)
+[Yahoo] percent-owned fetched for 300/700 keys (42.9%)
+[Yahoo] percent-owned fetched for 400/700 keys (57.1%)
+[Yahoo] percent-owned fetched for 500/700 keys (71.4%)
+[Yahoo] percent-owned fetched for 600/700 keys (85.7%)
+[Yahoo] percent-owned fetched for 700/700 keys (100.0%)
+[Yahoo] processed 100/700 (14.3%)
+[Yahoo] processed 200/700 (28.6%)
+[Yahoo] processed 300/700 (42.9%)
+[Yahoo] processed 400/700 (57.1%)
+[Yahoo] processed 500/700 (71.4%)
+[Yahoo] processed 600/700 (85.7%)
+[Yahoo] processed 700/700 (100.0%)
+[BQ] loading 700 rows to fantasy-survivor-app.nba_data.player_ownership …
+[BQ] done. 700 rows → fantasy-survivor-app.nba_data.player_ownership (2025-11-12, week=current)
+2025-11-13 01:00:32.173 - ERROR - query.py - yfpy.query:541 - No data found when attempting extraction from fields: ['league', 'players']
+2025-11-13 01:01:12.773 - ERROR - query.py - yfpy.query:541 - No data found when attempting extraction from fields: ['league', 'players']
+/Users/danielshenmuan/PycharmProjects/nba_api/.venv/lib/python3.13/site-packages/google/cloud/bigquery/table.py:1994: UserWarning: BigQuery Storage module not found, fetch data with the REST endpoint instead.
+  warnings.warn(
+[env] loaded /Users/danielshenmuan/PycharmProjects/nba_api/.env
+[AUTH] project: None
+[Yahoo] player pool fetched: 700 players
+[Yahoo] percent-owned fetched for 100/700 keys (14.3%)
+[Yahoo] percent-owned fetched for 200/700 keys (28.6%)
+[Yahoo] percent-owned fetched for 300/700 keys (42.9%)
+[Yahoo] percent-owned fetched for 400/700 keys (57.1%)
+[Yahoo] percent-owned fetched for 500/700 keys (71.4%)
+[Yahoo] percent-owned fetched for 600/700 keys (85.7%)
+[Yahoo] percent-owned fetched for 700/700 keys (100.0%)
+[Yahoo] processed 100/700 (14.3%)
+[Yahoo] processed 200/700 (28.6%)
+[Yahoo] processed 300/700 (42.9%)
+[Yahoo] processed 400/700 (57.1%)
+[Yahoo] processed 500/700 (71.4%)
+[Yahoo] processed 600/700 (85.7%)
+[Yahoo] processed 700/700 (100.0%)
+[BQ] loading 700 rows to fantasy-survivor-app.nba_data.player_ownership …
+[BQ] done. 700 rows → fantasy-survivor-app.nba_data.player_ownership (2025-11-13, week=current)
+2025-11-14 01:30:32.270 - ERROR - query.py - yfpy.query:541 - No data found when attempting extraction from fields: ['league', 'players']
+/Users/danielshenmuan/PycharmProjects/nba_api/.venv/lib/python3.13/site-packages/google/cloud/bigquery/table.py:1994: UserWarning: BigQuery Storage module not found, fetch data with the REST endpoint instead.
+  warnings.warn(
+[env] loaded /Users/danielshenmuan/PycharmProjects/nba_api/.env
+[AUTH] project: None
+[Yahoo] player pool fetched: 700 players
+[Yahoo] percent-owned fetched for 100/700 keys (14.3%)
+[Yahoo] percent-owned fetched for 200/700 keys (28.6%)
+[Yahoo] percent-owned fetched for 300/700 keys (42.9%)
+[Yahoo] percent-owned fetched for 400/700 keys (57.1%)
+[Yahoo] percent-owned fetched for 500/700 keys (71.4%)
+[Yahoo] percent-owned fetched for 600/700 keys (85.7%)
+[Yahoo] percent-owned fetched for 700/700 keys (100.0%)
+[Yahoo] processed 100/700 (14.3%)
+[Yahoo] processed 200/700 (28.6%)
+[Yahoo] processed 300/700 (42.9%)
+[Yahoo] processed 400/700 (57.1%)
+[Yahoo] processed 500/700 (71.4%)
+[Yahoo] processed 600/700 (85.7%)
+[Yahoo] processed 700/700 (100.0%)
+[BQ] loading 700 rows to fantasy-survivor-app.nba_data.player_ownership …
+[BQ] done. 700 rows → fantasy-survivor-app.nba_data.player_ownership (2025-11-14, week=current)
+2025-11-16 01:30:33.660 - ERROR - query.py - yfpy.query:541 - No data found when attempting extraction from fields: ['league', 'players']
+/Users/danielshenmuan/PycharmProjects/nba_api/.venv/lib/python3.13/site-packages/google/cloud/bigquery/table.py:1994: UserWarning: BigQuery Storage module not found, fetch data with the REST endpoint instead.
+  warnings.warn(
+[env] loaded /Users/danielshenmuan/PycharmProjects/nba_api/.env
+[AUTH] project: None
+[Yahoo] player pool fetched: 700 players
+[Yahoo] percent-owned fetched for 100/700 keys (14.3%)
+[Yahoo] percent-owned fetched for 200/700 keys (28.6%)
+[Yahoo] percent-owned fetched for 300/700 keys (42.9%)
+[Yahoo] percent-owned fetched for 400/700 keys (57.1%)
+[Yahoo] percent-owned fetched for 500/700 keys (71.4%)
+[Yahoo] percent-owned fetched for 600/700 keys (85.7%)
+[Yahoo] percent-owned fetched for 700/700 keys (100.0%)
+[Yahoo] processed 100/700 (14.3%)
+[Yahoo] processed 200/700 (28.6%)
+[Yahoo] processed 300/700 (42.9%)
+[Yahoo] processed 400/700 (57.1%)
+[Yahoo] processed 500/700 (71.4%)
+[Yahoo] processed 600/700 (85.7%)
+[Yahoo] processed 700/700 (100.0%)
+[BQ] loading 700 rows to fantasy-survivor-app.nba_data.player_ownership …
+[BQ] done. 700 rows → fantasy-survivor-app.nba_data.player_ownership (2025-11-16, week=current)
+2025-11-17 01:30:32.355 - ERROR - query.py - yfpy.query:541 - No data found when attempting extraction from fields: ['league', 'players']
+/Users/danielshenmuan/PycharmProjects/nba_api/.venv/lib/python3.13/site-packages/google/cloud/bigquery/table.py:1994: UserWarning: BigQuery Storage module not found, fetch data with the REST endpoint instead.
+  warnings.warn(
+[env] loaded /Users/danielshenmuan/PycharmProjects/nba_api/.env
+[AUTH] project: None
+[Yahoo] player pool fetched: 700 players
+[Yahoo] percent-owned fetched for 100/700 keys (14.3%)
+[Yahoo] percent-owned fetched for 200/700 keys (28.6%)
+[Yahoo] percent-owned fetched for 300/700 keys (42.9%)
+[Yahoo] percent-owned fetched for 400/700 keys (57.1%)
+[Yahoo] percent-owned fetched for 500/700 keys (71.4%)
+[Yahoo] percent-owned fetched for 600/700 keys (85.7%)
+[Yahoo] percent-owned fetched for 700/700 keys (100.0%)
+[Yahoo] processed 100/700 (14.3%)
+[Yahoo] processed 200/700 (28.6%)
+[Yahoo] processed 300/700 (42.9%)
+[Yahoo] processed 400/700 (57.1%)
+[Yahoo] processed 500/700 (71.4%)
+[Yahoo] processed 600/700 (85.7%)
+[Yahoo] processed 700/700 (100.0%)
+[BQ] loading 700 rows to fantasy-survivor-app.nba_data.player_ownership …
+[BQ] done. 700 rows → fantasy-survivor-app.nba_data.player_ownership (2025-11-17, week=current)
+[env] loaded /Users/danielshenmuan/PycharmProjects/nba_api/.env
+[AUTH] project: None
+[BQ] fantasy-survivor-app.nba_data.player_ownership already has rows for 2025-11-18; skipping ingestion.
+2025-11-19 01:33:51.188 - ERROR - query.py - yfpy.query:541 - No data found when attempting extraction from fields: ['league', 'players']
+/Users/danielshenmuan/PycharmProjects/nba_api/.venv/lib/python3.13/site-packages/google/cloud/bigquery/table.py:1994: UserWarning: BigQuery Storage module not found, fetch data with the REST endpoint instead.
+  warnings.warn(
+[env] loaded /Users/danielshenmuan/PycharmProjects/nba_api/.env
+[AUTH] project: None
+[Yahoo] player pool fetched: 700 players
+[Yahoo] percent-owned fetched for 100/700 keys (14.3%)
+[Yahoo] percent-owned fetched for 200/700 keys (28.6%)
+[Yahoo] percent-owned fetched for 300/700 keys (42.9%)
+[Yahoo] percent-owned fetched for 400/700 keys (57.1%)
+[Yahoo] percent-owned fetched for 500/700 keys (71.4%)
+[Yahoo] percent-owned fetched for 600/700 keys (85.7%)
+[Yahoo] percent-owned fetched for 700/700 keys (100.0%)
+[Yahoo] processed 100/700 (14.3%)
+[Yahoo] processed 200/700 (28.6%)
+[Yahoo] processed 300/700 (42.9%)
+[Yahoo] processed 400/700 (57.1%)
+[Yahoo] processed 500/700 (71.4%)
+[Yahoo] processed 600/700 (85.7%)
+[Yahoo] processed 700/700 (100.0%)
+[BQ] loading 700 rows to fantasy-survivor-app.nba_data.player_ownership …
+[BQ] done. 700 rows → fantasy-survivor-app.nba_data.player_ownership (2025-11-19, week=current)
