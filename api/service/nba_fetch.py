@@ -278,7 +278,9 @@ def get_player_roster_pct(
     SELECT
       player_id,
       player_name,
-      player_key,
+      -- player_key does not exist on player_ownership / v_player_ownership_latest.
+      -- Selected as NULL to preserve the existing API response shape.
+      CAST(NULL AS STRING) AS player_key,
       roster_pct,
       snapshot_date
     FROM `{table}`
