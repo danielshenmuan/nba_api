@@ -19,7 +19,12 @@ from google.cloud import bigquery
 load_dotenv()
 
 # Constants
-SPORTSBLAZE_Api_KEY = os.environ.get("SPORTSBLAZE_API_KEY", "sbfj1p7zzqrug1m89ydnnd6") # Default fallback if env not set
+SPORTSBLAZE_Api_KEY = os.environ.get("SPORTSBLAZE_API_KEY")
+if not SPORTSBLAZE_Api_KEY:
+    raise RuntimeError(
+        "SPORTSBLAZE_API_KEY is not set. Export it locally or supply it "
+        "from Secret Manager in Cloud Run. There is deliberately no fallback."
+    )
 BASE_URL = "https://api.sportsblaze.com/nba/v1/boxscores/daily"
 
 DEFAULT_PROJECT_ID = "fantasy-survivor-app"
