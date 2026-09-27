@@ -1,1 +1,31 @@
+# --- secrets (hardened 2026-09-26 after public leak) ---
 .env
+.env.*
+!.env.example
+secrets.json
+yahoo_oauth2.json
+*token*.json
+*credential*.json
+service-account*.json
+*.pem
+*.key
+
+# --- environments ---
+.venv/
+.yahoo-oauth-venv/
+venv/
+__pycache__/
+*.pyc
+
+# --- editors / os ---
+.idea/
+.vscode/
+.DS_Store
+
+# --- local artifacts ---
+*.log
+*.sqlite
+nba_cache.sqlite
+
+# --- nested clone, do not track ---
+nba_api/
