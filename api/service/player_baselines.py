@@ -2,7 +2,9 @@ from google.cloud import bigquery
 
 PROJECT = "fantasy-survivor-app"
 LOC = "northamerica-northeast1"
-TABLE_DAILY = "fantasy-survivor-app.nba_data.player_daily_game_stats_p"
+# Remapped view: NBA player_id (INT64), not the SportsBlaze UUID. See
+# nba_data.player_id_crosswalk. Switched 2026-09-26.
+TABLE_DAILY = "fantasy-survivor-app.nba_data.v_player_daily_game_stats"
 TABLE_HIST  = "fantasy-survivor-app.nba_data.player_historical_game_stats_p"
 TABLE_PRE   = "fantasy-survivor-app.nba_data.league_pg_stats_by_season"
 

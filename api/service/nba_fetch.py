@@ -7,7 +7,10 @@ import numpy as np
 
 PROJECT_ID = os.getenv("PROJECT_ID", "fantasy-survivor-app")
 DATASET = "nba_data"
-TABLE = "player_daily_game_stats_p"
+# Remapped view: exposes NBA player_id (INT64) instead of the SportsBlaze UUID.
+# See nba_data.player_id_crosswalk. Switched 2026-09-26 to fix the provider
+# ID-namespace break introduced in Feb 2026.
+TABLE = "v_player_daily_game_stats"
 TABLE_FQN = f"{PROJECT_ID}.{DATASET}.{TABLE}"
 
 OWNERSHIP_CURRENT_FQN = (
