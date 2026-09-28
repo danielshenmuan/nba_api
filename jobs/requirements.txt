@@ -5,3 +5,4 @@ db-dtypes
 nba_api==1.10.2
 yfpy==17.0.0
 yahoo-oauth==2.1.1
+requests

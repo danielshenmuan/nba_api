@@ -8,8 +8,8 @@ This document captures the key conventions and shortcuts that help both you (the
 
 ### Key Components
 1. `api/` — FastAPI app (`app.py`) plus service modules.
-2. `jobs/` — Ingestion, backfill scripts, and deployment helpers.
-3. `infra/` — BigQuery DDL + schema snapshots.
+2. `jobs/` — Ingestion, backfill scripts, and deployment helpers (including `fetch_schedule.py`).
+3. `infra/` — BigQuery DDL + schema snapshots (including `nba_schedule` and `player_games_next_7_days`).
 4. `tools/` — One-off validation scripts.
 
 Understanding this layout reduces time spent discovering files and avoids accidental edits in unrelated areas.
