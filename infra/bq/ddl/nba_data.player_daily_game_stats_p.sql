@@ -1,9 +1,14 @@
+-- *** player_id here is a SportsBlaze UUID (STRING), NOT an NBA player_id. ***
+-- It will not join to player_historical_game_stats, player_ownership, or the
+-- public API's ?player_id= contract. Query nba_data.v_player_daily_game_stats
+-- instead, which remaps it via nba_data.player_id_crosswalk. See docs/DATA-SOURCES.md
+
 CREATE TABLE IF NOT EXISTS `fantasy-survivor-app.nba_data.player_daily_game_stats_p` (
   game_date DATE,
-  game_id INT64,
-  player_id INT64,
+  game_id STRING,
+  player_id STRING,
   player_name STRING,
-  team_id INT64,
+  team_id STRING,
   team_abbr STRING,
   team_city STRING,
   team_name STRING,
