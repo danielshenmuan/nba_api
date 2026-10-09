@@ -6,7 +6,7 @@
 # Additive: writes only to the *_espn tables. Does not touch nba-daily-ingest.
 #
 # Usage:  ./deploy_espn_jobs.sh
-# Optional env: PROJECT_ID REGION SERVICE_ACCOUNT IMAGE_TAG
+# Optional env: PROJECT_ID REGION SERVICE_ACCOUNT IMAGE_TAG SKIP_BUILD=1 (reuse an existing IMAGE_TAG)
 # Optional secret: a Secret Manager secret named `discord-webhook-url` is mounted
 # into the health check as DISCORD_WEBHOOK_URL when it exists.
 set -euo pipefail
@@ -18,8 +18,12 @@ SERVICE_ACCOUNT=${SERVICE_ACCOUNT:-nba-gbq-sa@${PROJECT_ID}.iam.gserviceaccount.
 IMAGE_TAG=${IMAGE_TAG:-$(date +%Y%m%d%H%M%S)}
 IMAGE_URI="${REGION}-docker.pkg.dev/${PROJECT_ID}/nba-jobs/nba-espn-jobs:${IMAGE_TAG}"
 
-echo "Building ${IMAGE_URI}..."
-gcloud builds submit "${SCRIPT_DIR}" --project "${PROJECT_ID}" --tag "${IMAGE_URI}"
+if [[ "${SKIP_BUILD:-0}" != "1" ]]; then
+  echo "Building ${IMAGE_URI}..."
+  gcloud builds submit "${SCRIPT_DIR}" --project "${PROJECT_ID}" --tag "${IMAGE_URI}"
+else
+  echo "SKIP_BUILD=1: reusing ${IMAGE_URI}"
+fi
 
 upsert_job() {  # name script args timeout
   local name="$1" script="$2" args="$3" timeout="$4"; shift 4
@@ -35,7 +39,7 @@ upsert_job() {  # name script args timeout
     --image "${IMAGE_URI}" --service-account "${SERVICE_ACCOUNT}" \
     --command python --args "${arglist}" \
     --task-timeout "${timeout}" --max-retries 1 --memory 1Gi \
-    --set-env-vars "PROJECT_ID=${PROJECT_ID}" "${extra[@]}"
+    --set-env-vars "PROJECT_ID=${PROJECT_ID}" ${extra[@]+"${extra[@]}"}
 }
 
 upsert_schedule() {  # job_name schedule
@@ -58,7 +62,7 @@ HC_EXTRA=()
 if gcloud secrets describe discord-webhook-url --project "${PROJECT_ID}" >/dev/null 2>&1; then
   HC_EXTRA=(--set-secrets "DISCORD_WEBHOOK_URL=discord-webhook-url:latest")
 fi
-upsert_job nba-healthcheck healthcheck.py "" 300s "${HC_EXTRA[@]}"
+upsert_job nba-healthcheck healthcheck.py "" 300s ${HC_EXTRA[@]+"${HC_EXTRA[@]}"}
 upsert_schedule nba-healthcheck "0 8 * * *"      # after both ingests
 
 echo
