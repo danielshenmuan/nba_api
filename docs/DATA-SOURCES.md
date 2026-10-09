@@ -123,7 +123,7 @@ ESPN's **unofficial** site API (the JSON its own site and app call). No SLA. Dis
 |---|---|
 | Ingest | `jobs/espn_ingest.py` (`games`, `ownership`, `daily`, `seed-universe`, `repair-ids`) |
 | Health check | `jobs/healthcheck.py` — exits non-zero on failure; optional Discord webhook |
-| Deploy | `jobs/deploy_espn_jobs.sh` — creates `nba-espn-ingest` (02:30 ET) and `nba-healthcheck` (08:00 ET) |
+| Deploy | `jobs/deploy_espn_jobs.sh` — creates `nba-espn-ingest` (02:30 ET) and `nba-api-healthcheck` (08:00 ET) |
 | Endpoints | `site.api.espn.com/apis/site/v2/sports/basketball/nba/{scoreboard,summary}` · `lm-api-reads.fantasy.espn.com/apis/v3/games/fba/seasons/{year}/segments/0/leaguedefaults/3?view=kona_player_info` |
 
 | Table | Contents | Notes |
@@ -146,4 +146,6 @@ ESPN's **unofficial** site API (the JSON its own site and app call). No SLA. Dis
 - **Fallback to SportsBlaze:** run `infra/bq/ddl/nba_data.v_player_daily_game_stats.sportsblaze_fallback.sql`. The SportsBlaze job still runs and still writes `_p`.
 - **API dependencies are now pinned** (`api/requirements.txt`, the exact set of the last good image). An unpinned rebuild pulled `pyarrow` 26 next to `numpy` 1.26 and broke three endpoints; it was rolled back within minutes. Deploy API changes with `--no-traffic --tag` and test before promoting.
 
-**Still on Yahoo data:** `v_player_ownership_latest` / `roster_pct` in `/v1/daily_leaders` (frozen at 2026-02-02). See PRD §12.8.
+**Ownership (done 2026-10-09):** `v_player_ownership_latest` is now **Yahoo primary, ESPN fallback**: a player gets Yahoo's value if Yahoo's latest snapshot is at most 3 days old, otherwise ESPN's. Yahoo is frozen at 2026-02-02, so today everyone is served from ESPN. Same 4 columns and types, so no API change. It matters: `/v1/daily_leaders` filters the *worst performers* list to players owned at 20% or more, so stale ownership was shaping the 爆胎榜 post. `v_ownership_daily` lists every source side by side with a percentile rank per source. Rollback: `nba_data.v_player_ownership_latest.yahoo_only.sql`.
+
+**Pinned dependencies:** `jobs/requirements.txt` and `api/requirements.txt` are exact `pip freeze` sets from images that ran. Bump deliberately; for the API, deploy with `--no-traffic --tag` and test before promoting.

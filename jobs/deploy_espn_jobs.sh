@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build the jobs image once and create-or-update two Cloud Run jobs + schedulers:
 #   nba-espn-ingest   python espn_ingest.py daily   (yesterday's games + today's ownership)
-#   nba-healthcheck   python healthcheck.py         (fails the run if the pipeline is unhealthy)
+#   nba-api-healthcheck   python healthcheck.py         (fails the run if the pipeline is unhealthy)
 #
 # Additive: writes only to the *_espn tables. Does not touch nba-daily-ingest.
 #
@@ -62,8 +62,8 @@ HC_EXTRA=()
 if gcloud secrets describe discord-webhook-url --project "${PROJECT_ID}" >/dev/null 2>&1; then
   HC_EXTRA=(--set-secrets "DISCORD_WEBHOOK_URL=discord-webhook-url:latest")
 fi
-upsert_job nba-healthcheck healthcheck.py "" 300s ${HC_EXTRA[@]+"${HC_EXTRA[@]}"}
-upsert_schedule nba-healthcheck "0 8 * * *"      # after both ingests
+upsert_job nba-api-healthcheck healthcheck.py "" 300s ${HC_EXTRA[@]+"${HC_EXTRA[@]}"}
+upsert_schedule nba-api-healthcheck "0 8 * * *"      # after both ingests
 
 echo
-echo "Deployed nba-espn-ingest (02:30 ET) and nba-healthcheck (08:00 ET) using ${IMAGE_URI}"
+echo "Deployed nba-espn-ingest (02:30 ET) and nba-api-healthcheck (08:00 ET) using ${IMAGE_URI}"
