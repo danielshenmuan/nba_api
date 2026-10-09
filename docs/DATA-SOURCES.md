@@ -115,7 +115,7 @@ Bridged by `nba_data.player_id_crosswalk`. **Always read daily stats through `v_
 
 ---
 
-## ESPN pipeline (added 2026-10-09) — deployed, **not yet cut over**
+## ESPN pipeline (added 2026-10-09) — **cut over 2026-10-09**
 
 ESPN's **unofficial** site API (the JSON its own site and app call). No SLA. Disney's terms prohibit scripted access, so: tiny volume (~15 requests/day), cache, honest user agent, never retry on 403, alert on any block. SportsBlaze stays live as validator and fallback until cutover.
 
@@ -139,4 +139,11 @@ ESPN's **unofficial** site API (the JSON its own site and app call). No SLA. Dis
 
 **Known differences:** minutes are whole numbers; sub-minute cameos show as `0` and are skipped; the NBA Cup final (competition type `CC`) and All-Star games are excluded (ESPN tags them season type 2, but they count in neither the 82 games nor fantasy scoring; the NBA-era table wrongly included the Cup final); `game_id` is the ESPN event id.
 
-**Cutover checklist** (not done): (1) repoint `v_player_daily_game_stats` to `player_daily_game_stats_espn`; (2) repoint `infra/bq/sql/create_league_pg_stats_by_season.sql` and `jobs/sql/` — it reads `_p` directly, so z-score baselines stay on incomplete data until changed; (3) decide whether SportsBlaze keeps running as fallback.
+**Cutover (done 2026-10-09):**
+- `v_player_daily_game_stats` now reads `player_daily_game_stats_espn` with the **identical 35-column contract** (`game_id`/`team_id` cast to STRING, unresolved players included with negative ids). The n8n call `/v1/daily_leaders` returns identical players, scores, keys and types before and after.
+- `league_pg_stats_by_season` is rebuilt **one season at a time** from the ESPN table (the old SQL replaced the whole table, so a new season erased the last one). The ESPN daily job refreshes the current *and previous* season each night. Rollback copy: `league_pg_stats_by_season_bak_20261009`.
+- **Bug fixed:** FG%/FT% z-scores in `/v1/player_baselines` were NULL (then 0) because shot attempts came from `player_historical_game_stats_p`, which never contains the current season. They now come from the daily table.
+- **Fallback to SportsBlaze:** run `infra/bq/ddl/nba_data.v_player_daily_game_stats.sportsblaze_fallback.sql`. The SportsBlaze job still runs and still writes `_p`.
+- **API dependencies are now pinned** (`api/requirements.txt`, the exact set of the last good image). An unpinned rebuild pulled `pyarrow` 26 next to `numpy` 1.26 and broke three endpoints; it was rolled back within minutes. Deploy API changes with `--no-traffic --tag` and test before promoting.
+
+**Still on Yahoo data:** `v_player_ownership_latest` / `roster_pct` in `/v1/daily_leaders` (frozen at 2026-02-02). See PRD §12.8.

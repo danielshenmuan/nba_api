@@ -15,6 +15,7 @@ Subcommands
     daily           yesterday's games + today's ownership (the Cloud Run job)
     seed-universe   (re)build nba_data.nba_player_universe (needs nba_api, local)
     repair-ids      re-resolve surrogate (negative) ids and rewrite them in place
+    baselines       recompute league means/stds (z-score baselines); default current + previous season
 
 Examples
     python espn_ingest.py games --date 2026-01-04 --dry-run
@@ -396,6 +397,27 @@ def run_ownership(season_year: int | None, dry_run: bool) -> pd.DataFrame:
     return out
 
 
+# --------------------------------------------------------------------------- league baselines
+BASELINE_SQL = Path(__file__).resolve().parent / "sql" / "create_league_pg_stats_by_season.sql"
+
+
+def refresh_league_stats(years: list[int] | None = None) -> None:
+    """Recompute league means/stds (the z-score baselines) from the ESPN table.
+
+    Defaults to the current AND previous season. The previous one is recomputed on purpose: the
+    legacy SportsBlaze job still runs its own (table-replacing) refresh at 01:00 ET and would
+    otherwise leave only the current season in the table.
+    """
+    bq = bigquery.Client(project=PROJECT, location=BQ_LOCATION)
+    today = datetime.now(ET).date()
+    cur = today.year if today.month >= 10 else today.year - 1
+    sql = BASELINE_SQL.read_text()
+    for y in (years or [cur - 1, cur]):
+        cfg = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("season_start_year", "INT64", y)])
+        bq.query(sql, job_config=cfg, location=BQ_LOCATION).result()
+        print(f"  league baselines refreshed for {y}-{(y + 1) % 100:02d}")
+
+
 # --------------------------------------------------------------------------- universe seed
 def seed_universe() -> None:
     from nba_api.stats.static import players  # offline static list, local use only
@@ -456,6 +478,7 @@ def main() -> None:
     dly = sub.add_parser("daily"); dly.add_argument("--dry-run", action="store_true")
     sub.add_parser("seed-universe")
     sub.add_parser("repair-ids")
+    bl = sub.add_parser("baselines"); bl.add_argument("--year", type=int, action="append")
     a = ap.parse_args()
     parse = lambda s: datetime.strptime(s, "%Y-%m-%d").date()
     try:
@@ -470,10 +493,14 @@ def main() -> None:
             # Re-pull the day before too: late West Coast finals and stat corrections. Idempotent.
             run_games(yday - timedelta(days=1), yday, a.dry_run)
             run_ownership(None, a.dry_run)
+            if not a.dry_run:
+                refresh_league_stats()
         elif a.cmd == "seed-universe":
             seed_universe()
         elif a.cmd == "repair-ids":
             repair_ids()
+        elif a.cmd == "baselines":
+            refresh_league_stats(a.year)
     except BlockedError as e:
         print(f"BLOCKED: {e}", file=sys.stderr)
         sys.exit(3)

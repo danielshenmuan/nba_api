@@ -25,9 +25,10 @@ def get_player_baselines_v1(player_id: int, season: str, window: int = 5):
       SELECT
         d.player_id, d.player_name, d.game_date, d.minutes as minutes,
         d.pts, d.reb, d.ast, d.stl, d.blk, d.fg3m, d.fg_pct, d.ft_pct, d.turnovers,
-        h.fg_attempts AS fga, h.ft_attempts AS fta
+        d.fga AS fga, d.fta AS fta   -- attempts come from the daily table itself (the old join to
+                                     -- player_historical_game_stats_p never matched current-season games,
+                                     -- so FG%/FT% z-scores were NULL, then 0)
       FROM `{TABLE_DAILY}` d
-      LEFT JOIN `{TABLE_HIST}` h USING (player_id, game_date)
       WHERE d.player_id = @pid
         AND d.season = @season          -- fast equality on cluster + prunes by date below
         AND d.game_date BETWEEN s_start AND s_end

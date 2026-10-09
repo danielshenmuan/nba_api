@@ -1,29 +1,31 @@
--- Rebuilds league_pg_stats_by_season for the *current* season inferred from today.
--- NOTE: This file duplicates infra/bq/sql/create_league_pg_stats_by_season.sql so the
---       ingestion job can bundle the query when only the jobs/ directory is deployed.
-CREATE OR REPLACE TABLE `fantasy-survivor-app.nba_data.league_pg_stats_by_season` AS
-WITH cur AS (
+-- NOTE: duplicates infra/bq/sql/create_league_pg_stats_by_season.sql so a deploy of only jobs/ still bundles it.
+-- Rebuilds ONE season of league_pg_stats_by_season from player_daily_game_stats_espn and
+-- leaves every other season untouched (the old version replaced the whole table, so the
+-- first run of a new season erased the previous one).
+--
+-- Parameter: @season_start_year INT64   e.g. 2025 = the 2025-26 season.
+--            NULL = the season in progress today (US Eastern).
+-- Methodology is unchanged from the SportsBlaze-era query so z-scores stay on the same scale.
+-- The fix: fga/fta now come straight from the ESPN table. The old LEFT JOIN to
+-- player_historical_game_stats_p never matched, so s_fg_imp / s_ft_imp were 0 and every
+-- FG% / FT% z-score in /v1/player_baselines was NULL.
+DECLARE today DATE DEFAULT CURRENT_DATE('America/New_York');
+DECLARE y1 INT64 DEFAULT IFNULL(@season_start_year,
+  IF(EXTRACT(MONTH FROM today) >= 10, EXTRACT(YEAR FROM today), EXTRACT(YEAR FROM today) - 1));
+DECLARE season_label STRING DEFAULT FORMAT('%d-%02d', y1, MOD(y1 + 1, 100));
+
+BEGIN TRANSACTION;
+
+DELETE FROM `fantasy-survivor-app.nba_data.league_pg_stats_by_season` WHERE season = season_label;
+
+INSERT INTO `fantasy-survivor-app.nba_data.league_pg_stats_by_season` (season, means, stds, usage_q101)
+WITH season_games AS (
   SELECT
-    IF(EXTRACT(MONTH FROM CURRENT_DATE()) >= 10, EXTRACT(YEAR FROM CURRENT_DATE()), EXTRACT(YEAR FROM CURRENT_DATE()) - 1) AS y1
-),
-season_bounds AS (
-  SELECT
-    FORMAT('%d-%02d', y1, MOD(y1+1,100)) AS season,
-    DATE(y1, 10, 1) AS start_date,
-    DATE(y1+1, 6, 30) AS end_date
-  FROM cur
-),
-season_games AS (
-  SELECT
-    d.player_id, d.game_date, d.minutes,
-    d.pts, d.reb, d.ast, d.stl, d.blk, d.fg3m, d.fg_pct, d.ft_pct, d.turnovers,
-    h.fg_attempts AS fga, h.ft_attempts AS fta
-  FROM `fantasy-survivor-app.nba_data.player_daily_game_stats_p` d
-  LEFT JOIN `fantasy-survivor-app.nba_data.player_historical_game_stats_p` h
-    USING (player_id, game_date)
-  JOIN season_bounds sb
-    ON d.game_date BETWEEN sb.start_date AND sb.end_date
-  WHERE d.minutes > 0
+    player_id, game_date, minutes,
+    pts, reb, ast, stl, blk, fg3m, fg_pct, ft_pct, turnovers, fga, fta
+  FROM `fantasy-survivor-app.nba_data.player_daily_game_stats_espn`
+  WHERE game_date BETWEEN DATE(y1, 10, 1) AND DATE(y1 + 1, 6, 30)
+    AND minutes > 0
 ),
 per_player_pg AS (
   SELECT
@@ -56,7 +58,11 @@ usage_quantiles AS (
   SELECT APPROX_QUANTILES(usage_per_min, 101) AS usage_q101 FROM per_player_pg
 )
 SELECT
-  (SELECT season FROM season_bounds) AS season,
+  season_label AS season,
   (SELECT AS STRUCT * FROM league_means) AS means,
   (SELECT AS STRUCT * FROM league_std)   AS stds,
-  (SELECT usage_q101 FROM usage_quantiles) AS usage_q101;
+  (SELECT usage_q101 FROM usage_quantiles) AS usage_q101
+-- no rows in the season yet (e.g. preseason) -> insert nothing rather than a row of NULLs
+FROM (SELECT 1) WHERE EXISTS (SELECT 1 FROM season_games);
+
+COMMIT TRANSACTION;

@@ -1,20 +1,23 @@
--- Daily stats with player_id remapped from SportsBlaze UUID to NBA player_id.
--- Created 2026-09-26.
+-- LIVE definition (cut over from SportsBlaze to ESPN on 2026-10-09).
 --
--- *** READ THIS BEFORE QUERYING DAILY STATS ***
--- Always read through this view, never `player_daily_game_stats_p` directly.
--- The raw table's player_id is a SportsBlaze UUID (STRING) and will not join to
--- player_historical_game_stats, player_ownership, or the public API's
--- ?player_id= contract, all of which use NBA integer ids.
+-- Same 35 columns, same order and same TYPES as the SportsBlaze-era view, so the FastAPI
+-- service and n8n see no contract change: game_id and team_id are STRING again.
+-- Unresolved players are INCLUDED with a negative surrogate player_id (-espn_id) so a
+-- breakout call-up still shows up in daily leaders.
 --
--- Rows whose player is not yet in player_id_crosswalk are EXCLUDED
--- (5,868 of 5,976 exposed as of 2026-09-26 = 98.19%).
+-- Fallback to SportsBlaze: run nba_data.v_player_daily_game_stats.sportsblaze_fallback.sql
 CREATE OR REPLACE VIEW `fantasy-survivor-app.nba_data.v_player_daily_game_stats` AS
 SELECT
-  x.nba_player_id AS player_id,
-  d.player_id     AS source_player_id,
-  d.* EXCEPT(player_id)
-FROM `fantasy-survivor-app.nba_data.player_daily_game_stats_p` d
-JOIN `fantasy-survivor-app.nba_data.player_id_crosswalk` x
-  ON x.sb_uuid = d.player_id
-WHERE x.nba_player_id IS NOT NULL;
+  player_id,
+  CAST(NULL AS STRING)       AS source_player_id,
+  game_date,
+  CAST(game_id AS STRING)    AS game_id,
+  player_name,
+  CAST(team_id AS STRING)    AS team_id,
+  team_abbr, team_city, team_name, team_slug,
+  position, comment, jersey_num,
+  minutes,
+  fgm, fga, fg_pct, fg3m, fg3a, fg3_pct, ftm, fta, ft_pct,
+  pts, reb, ast, stl, blk, turnovers, pf, dreb, oreb, plus_minus,
+  z_score, season
+FROM `fantasy-survivor-app.nba_data.player_daily_game_stats_espn`;
