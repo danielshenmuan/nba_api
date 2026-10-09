@@ -112,3 +112,27 @@ Bridged by `nba_data.player_id_crosswalk`. **Always read daily stats through `v_
 **Ownership stale** → Yahoo token. Re-auth, re-run `nba-ownership-ingest`.
 **No new daily stats in season** → check SportsBlaze key hasn't expired, then job logs.
 **New player missing** → not in `player_id_crosswalk`. Add a row with `match_method='manual'`.
+
+---
+
+## ESPN pipeline (added 2026-10-09) — staging, not yet cut over
+
+ESPN's **unofficial** site API (the JSON its own site and app call). No SLA. Disney's terms prohibit scripted access, so: tiny volume (~15 requests/day), cache, honest user agent, never retry on 403, alert on any block. SportsBlaze stays live as validator and fallback until cutover.
+
+| Piece | Where |
+|---|---|
+| Ingest | `jobs/espn_ingest.py` (`games`, `ownership`, `daily`, `seed-universe`, `repair-ids`) |
+| Health check | `jobs/healthcheck.py` — exits non-zero on failure; optional Discord webhook |
+| Deploy | `jobs/deploy_espn_jobs.sh` — creates `nba-espn-ingest` (02:30 ET) and `nba-healthcheck` (08:00 ET) |
+| Endpoints | `site.api.espn.com/apis/site/v2/sports/basketball/nba/{scoreboard,summary}` · `lm-api-reads.fantasy.espn.com/apis/v3/games/fba/seasons/{year}/segments/0/leaguedefaults/3?view=kona_player_info` |
+
+| Table | Contents | Notes |
+|---|---|---|
+| `player_daily_game_stats_espn` | 34 columns, NBA-era types. Regular season only (ESPN season type 2) | `game_id` = ESPN event id. Minutes are whole numbers (ESPN does not publish seconds). `player_id` = NBA person id, or `-espn_id` if unresolved |
+| `player_ownership_espn` | `player_id, player_name, roster_pct, snapshot_date` + `pct_change, pct_started, injury_status, espn_player_id` | ESPN exposes **current values only**: history starts 2026-10-09. A different population from Yahoo — correlated, not equal |
+| `espn_player_map` | ESPN athlete id → NBA person id | Only resolved mappings are stored. Fix one with a plain `UPDATE`/`INSERT` (`method='manual'`) |
+| `nba_player_universe` | ~5,100 NBA ids with every name spelling | Seeded from `nba_api` 1.11.4's offline list + BigQuery history. Rebuild when a newer `nba_api` ships; then run `repair-ids` |
+
+**Identity rules:** names are normalised (accents, punctuation, Jr./III removed). Resolution prefers ids seen in our own history, then active players, then anyone. Two-word names are retried in reverse order (ESPN "Yang Hansen" = NBA "Hansen Yang"). Ambiguity is never guessed: those players keep a surrogate id until fixed.
+
+**Validated against the NBA-era table** (2025-10-21 → 2025-11-25, partial): 99% of overlapping lines are identical on every counting stat; the ~1% that differ are ±1 in one stat (post-game stat corrections). ESPN also holds ~36 regular-season games that the NBA-era table never ingested.

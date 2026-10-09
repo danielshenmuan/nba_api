@@ -14,6 +14,7 @@ Subcommands
     ownership       ESPN Fantasy percentOwned snapshot (current values only)
     daily           yesterday's games + today's ownership (the Cloud Run job)
     seed-universe   (re)build nba_data.nba_player_universe (needs nba_api, local)
+    repair-ids      re-resolve surrogate (negative) ids and rewrite them in place
 
 Examples
     python espn_ingest.py games --date 2026-01-04 --dry-run
@@ -201,6 +202,15 @@ def fetch_games(d: date, season_types=(REGULAR_SEASON,)) -> list[dict]:
         stype = (ev.get("season") or {}).get("type")
         if stype not in season_types or not ev.get("status", {}).get("type", {}).get("completed"):
             continue
+        comp = (ev.get("competitions") or [{}])[0]
+        # NBA Cup championship (type CC) and All-Star games are tagged season type 2 by ESPN but
+        # count in neither the 82-game season nor fantasy scoring. Cup QF/SF are type STD and DO count.
+        if (comp.get("type") or {}).get("abbreviation", "STD") != "STD":
+            continue
+        abbrs = {ESPN_ABBR_FIX.get(c["team"].get("abbreviation", ""), c["team"].get("abbreviation", ""))
+                 for c in comp.get("competitors", [])}
+        if not abbrs <= set(NBA_TEAM_ID):
+            continue
         s = get_json(f"{SITE}/summary", params={"event": ev["id"]}, cache_key=f"summary_{ev['id']}")
         if s:
             rows.extend(parse_summary(d, ev["id"], s))
@@ -227,7 +237,12 @@ def load_universe(bq: bigquery.Client) -> dict[str, list[dict]]:
 
 
 def resolve_one(name: str, universe: dict[str, list[dict]]) -> int | None:
-    cands = universe.get(norm_name(name), [])
+    key = norm_name(name)
+    cands = universe.get(key, [])
+    if not cands:
+        toks = key.split()
+        if len(toks) == 2:  # ESPN "Yang Hansen" vs NBA "Hansen Yang": family name order differs
+            cands = universe.get(f"{toks[1]} {toks[0]}", [])
     for pred in (lambda c: c["in_bq_history"], lambda c: c["is_active"], lambda c: True):
         tier = {c["nba_id"] for c in cands if pred(c)}
         if len(tier) == 1:
@@ -391,19 +406,44 @@ def seed_universe() -> None:
         UNION DISTINCT SELECT DISTINCT player_id, player_name FROM `{PROJECT}.{DATASET}.player_historical_game_stats` WHERE player_name IS NOT NULL
     """, location=BQ_LOCATION).to_dataframe()
     hist = hist.dropna(subset=["nba_id"])
-    rows = {}
+    recs: dict[tuple[int, str], dict] = {}
     for p in players.get_players():
-        rows[p["id"]] = {"nba_id": p["id"], "full_name": p["full_name"], "is_active": bool(p["is_active"]), "in_bq_history": False}
+        recs[(p["id"], p["full_name"])] = {"nba_id": p["id"], "full_name": p["full_name"],
+                                           "is_active": bool(p["is_active"])}
+    hist_ids: set[int] = set()
     for _, r in hist.iterrows():
-        rec = rows.setdefault(int(r.nba_id), {"nba_id": int(r.nba_id), "full_name": r.player_name, "is_active": True})
-        rec["in_bq_history"] = True
-        rec["full_name"] = r.player_name
+        hist_ids.add(int(r.nba_id))
+        recs.setdefault((int(r.nba_id), r.player_name),
+                        {"nba_id": int(r.nba_id), "full_name": r.player_name, "is_active": True})
+    for rec in recs.values():
+        rec["in_bq_history"] = rec["nba_id"] in hist_ids  # applies to every spelling of that id
+    rows = recs
     df = pd.DataFrame(rows.values())
     df["norm_name"] = df["full_name"].map(norm_name)
     df = df[["nba_id", "full_name", "norm_name", "is_active", "in_bq_history"]]
     bq.load_table_from_dataframe(df, T_UNIV, location=BQ_LOCATION,
         job_config=bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")).result()
     print(f"universe seeded: {len(df)} ids ({int(df.in_bq_history.sum())} seen in BQ history)")
+
+
+def repair_ids() -> None:
+    """Re-resolve surrogate (negative) ids and rewrite them in place."""
+    bq = bigquery.Client(project=PROJECT, location=BQ_LOCATION)
+    q = f"""SELECT -player_id AS espn_id, ANY_VALUE(player_name) AS name FROM `{T_GAMES}` WHERE player_id < 0 GROUP BY 1
+            UNION DISTINCT SELECT -player_id, ANY_VALUE(player_name) FROM `{T_OWN}` WHERE player_id < 0 GROUP BY 1"""
+    pairs = {int(r.espn_id): r.name for r in bq.query(q, location=BQ_LOCATION).result()}
+    if not pairs:
+        print("no surrogate ids to repair"); return
+    mapping = resolve_players(bq, pairs, persist=True)
+    fixed = {e: n for e, n in mapping.items() if n}
+    for table in (T_GAMES, T_OWN):
+        for e, n in fixed.items():
+            bq.query(f"UPDATE `{table}` SET player_id = @n WHERE player_id = @s", location=BQ_LOCATION,
+                     job_config=bigquery.QueryJobConfig(query_parameters=[
+                         bigquery.ScalarQueryParameter("n", "INT64", n),
+                         bigquery.ScalarQueryParameter("s", "INT64", -e)])).result()
+    left = [pairs[e] for e in pairs if e not in fixed]
+    print(f"repaired {len(fixed)} of {len(pairs)} surrogate ids; still unresolved: {left[:25]}")
 
 
 # --------------------------------------------------------------------------- cli
@@ -415,6 +455,7 @@ def main() -> None:
     o = sub.add_parser("ownership"); o.add_argument("--season-year", type=int); o.add_argument("--dry-run", action="store_true")
     dly = sub.add_parser("daily"); dly.add_argument("--dry-run", action="store_true")
     sub.add_parser("seed-universe")
+    sub.add_parser("repair-ids")
     a = ap.parse_args()
     parse = lambda s: datetime.strptime(s, "%Y-%m-%d").date()
     try:
@@ -426,10 +467,13 @@ def main() -> None:
             run_ownership(a.season_year, a.dry_run)
         elif a.cmd == "daily":
             yday = datetime.now(ET).date() - timedelta(days=1)
-            run_games(yday, yday, a.dry_run)
+            # Re-pull the day before too: late West Coast finals and stat corrections. Idempotent.
+            run_games(yday - timedelta(days=1), yday, a.dry_run)
             run_ownership(None, a.dry_run)
         elif a.cmd == "seed-universe":
             seed_universe()
+        elif a.cmd == "repair-ids":
+            repair_ids()
     except BlockedError as e:
         print(f"BLOCKED: {e}", file=sys.stderr)
         sys.exit(3)
