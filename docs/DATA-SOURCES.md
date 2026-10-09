@@ -115,7 +115,7 @@ Bridged by `nba_data.player_id_crosswalk`. **Always read daily stats through `v_
 
 ---
 
-## ESPN pipeline (added 2026-10-09) — staging, not yet cut over
+## ESPN pipeline (added 2026-10-09) — deployed, **not yet cut over**
 
 ESPN's **unofficial** site API (the JSON its own site and app call). No SLA. Disney's terms prohibit scripted access, so: tiny volume (~15 requests/day), cache, honest user agent, never retry on 403, alert on any block. SportsBlaze stays live as validator and fallback until cutover.
 
@@ -135,4 +135,8 @@ ESPN's **unofficial** site API (the JSON its own site and app call). No SLA. Dis
 
 **Identity rules:** names are normalised (accents, punctuation, Jr./III removed). Resolution prefers ids seen in our own history, then active players, then anyone. Two-word names are retried in reverse order (ESPN "Yang Hansen" = NBA "Hansen Yang"). Ambiguity is never guessed: those players keep a surrogate id until fixed.
 
-**Validated against the NBA-era table** (2025-10-21 → 2025-11-25, partial): 99% of overlapping lines are identical on every counting stat; the ~1% that differ are ±1 in one stat (post-game stat corrections). ESPN also holds ~36 regular-season games that the NBA-era table never ingested.
+**Validated, full 2025-26 regular season:** 26,547 lines, 1,230 games, every team at exactly 82. Against the NBA-era table (Oct 21 – Jan 23): 99.29% of 11,325 shared lines identical on every counting stat. Against SportsBlaze (Feb 1 – Apr 12): 98.85% of 4,353. The ~1% that differ are ±1 in one stat (post-game corrections). ESPN adds ~9.6k lines that those tables never ingested, so last season's history in the older tables was incomplete.
+
+**Known differences:** minutes are whole numbers; sub-minute cameos show as `0` and are skipped; the NBA Cup final (competition type `CC`) and All-Star games are excluded (ESPN tags them season type 2, but they count in neither the 82 games nor fantasy scoring; the NBA-era table wrongly included the Cup final); `game_id` is the ESPN event id.
+
+**Cutover checklist** (not done): (1) repoint `v_player_daily_game_stats` to `player_daily_game_stats_espn`; (2) repoint `infra/bq/sql/create_league_pg_stats_by_season.sql` and `jobs/sql/` — it reads `_p` directly, so z-score baselines stay on incomplete data until changed; (3) decide whether SportsBlaze keeps running as fallback.
