@@ -148,4 +148,6 @@ ESPN's **unofficial** site API (the JSON its own site and app call). No SLA. Dis
 
 **Ownership (done 2026-10-09):** `v_player_ownership_latest` is now **Yahoo primary, ESPN fallback**: a player gets Yahoo's value if Yahoo's latest snapshot is at most 3 days old, otherwise ESPN's. Yahoo is frozen at 2026-02-02, so today everyone is served from ESPN. Same 4 columns and types, so no API change. It matters: `/v1/daily_leaders` filters the *worst performers* list to players owned at 20% or more, so stale ownership was shaping the 爆胎榜 post. `v_ownership_daily` lists every source side by side with a percentile rank per source. Rollback: `nba_data.v_player_ownership_latest.yahoo_only.sql`.
 
+**`z_score` weight (2026-10-09):** the per-game `z_score` now counts turnovers at **0.2** (was 1.0), matching `DEFAULT_TO_WEIGHT` in the analyst engine. History was recomputed in place; rollback copy `player_daily_game_stats_espn_bak_20261009`. The SportsBlaze fallback view recomputes `z_score` at the same weight so the scale does not change if it is used.
+
 **Pinned dependencies:** `jobs/requirements.txt` and `api/requirements.txt` are exact `pip freeze` sets from images that ran. Bump deliberately; for the API, deploy with `--no-traffic --tag` and test before promoting.
