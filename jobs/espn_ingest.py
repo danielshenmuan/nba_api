@@ -60,6 +60,9 @@ ET = ZoneInfo("America/New_York")
 # Order: PTS, REB, AST, STL, BLK, FG3M, FG%, FT%, TO
 WEIGHTED_MEAN = [11.69, 4.32, 2.76, 0.75, 0.50, 1.28, 0.47, 0.75, 1.33]
 WEIGHTED_STD = [7.23, 2.51, 2.09, 0.38, 0.45, 0.95, 0.082, 0.124, 0.85]
+# Turnovers count at 0.2 in the headline Fantasy Value (Daniel, 2026-10-09; PRD s5.1). The SportsBlaze-era
+# code used 1.0. Keep in step with DEFAULT_TO_WEIGHT in analyst-engine/src/fantasyValue.ts.
+TO_WEIGHT = 0.2
 
 NBA_TEAM_ID = {
     "ATL": 1610612737, "BOS": 1610612738, "CLE": 1610612739, "NOP": 1610612740,
@@ -219,11 +222,11 @@ def fetch_games(d: date, season_types=(REGULAR_SEASON,)) -> list[dict]:
 
 
 def add_zscores(df: pd.DataFrame) -> pd.DataFrame:
-    """Identical math to daily_ingest_sportsblaze.compute_zscores, vectorised."""
+    """Same math as daily_ingest_sportsblaze.compute_zscores, vectorised, except turnovers count at TO_WEIGHT (0.2), not 1."""
     vals = df[["pts", "reb", "ast", "stl", "blk", "fg3m", "fg_pct", "ft_pct", "turnovers"]].astype(float).to_numpy()
     z = (vals - np.array(WEIGHTED_MEAN)) / np.array(WEIGHTED_STD)
     mult = np.column_stack([np.ones((len(df), 6)), df["fga"].astype(float) / 20.0,
-                            df["fta"].astype(float) / 8.0, -np.ones(len(df))])
+                            df["fta"].astype(float) / 8.0, -TO_WEIGHT * np.ones(len(df))])
     df["z_score"] = np.round((z * mult).sum(axis=1), 3)
     return df
 

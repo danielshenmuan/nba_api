@@ -30,6 +30,7 @@ TODAY = datetime.now(ZoneInfo("America/New_York")).date()
 IN_SEASON = SEASON_START <= TODAY <= SEASON_END
 
 failures: list[str] = []
+warnings: list[str] = []   # reported, but do not fail the run (e.g. the SportsBlaze fallback)
 notes: list[str] = []
 
 
@@ -72,8 +73,12 @@ for label, table in (("espn", "player_daily_game_stats_espn"), ("sportsblaze", "
     last = q(f"SELECT MAX(game_date) d FROM `{PROJECT}.nba_data.{table}`").d
     if IN_SEASON:
         ok = last is not None and (TODAY - last).days <= GAMES_MAX_AGE_DAYS
-        check(ok, f"games[{label}] fresh (latest {last})",
-              f"games[{label}] stale: latest {last}, {(TODAY - last).days if last else '?'} days old")
+        stale = f"games[{label}] stale: latest {last}, {(TODAY - last).days if last else '?'} days old"
+        if label == "sportsblaze" and not ok:
+            # Kept only as a fallback; its API key expires monthly. Warn, do not fail the run.
+            warnings.append("WARN " + stale + " (fallback only; key expired?)")
+        else:
+            check(ok, f"games[{label}] fresh (latest {last})", stale)
     else:
         notes.append(f"SKIP games[{label}] freshness (off-season; latest {last})")
 
@@ -86,13 +91,14 @@ if row.n:
           f"unresolved ids {rate:.1%} of {row.n} recent lines (>5%): refresh nba_player_universe")
 
 print(f"{TODAY} in_season={IN_SEASON}")
-print("\n".join(notes + failures))
+print("\n".join(notes + warnings + failures))
+hook = os.getenv("DISCORD_WEBHOOK_URL")
+if hook and (failures or warnings):
+    head = "🚨 **Fantasy pipeline health check failed**" if failures else "⚠️ **Fantasy pipeline health check: warnings**"
+    body = head + "\n" + "\n".join(f"• {m}" for m in failures + warnings)
+    try:
+        requests.post(hook, json={"content": body[:1900]}, timeout=20)
+    except Exception as e:
+        print(f"(could not post to Discord: {e})")
 if failures:
-    hook = os.getenv("DISCORD_WEBHOOK_URL")
-    if hook:
-        body = "🚨 **Fantasy pipeline health check failed**\n" + "\n".join(f"• {f}" for f in failures)
-        try:
-            requests.post(hook, json={"content": body[:1900]}, timeout=20)
-        except Exception as e:
-            print(f"(could not post to Discord: {e})")
     sys.exit(1)
