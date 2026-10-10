@@ -9,7 +9,8 @@ Checks
   4. identity health: share of recent lines with unresolved (negative) player ids
 
 Env
-  DISCORD_WEBHOOK_URL   optional; failures are posted here
+  DISCORD_WEBHOOK_URL   optional; failures and warnings are posted here
+  POST_SUMMARY=1        also post an "all clear" when everything passes (off by default)
   SEASON_START / SEASON_END   ISO dates; games freshness is only enforced in between
 """
 from __future__ import annotations
@@ -93,12 +94,24 @@ if row.n:
 print(f"{TODAY} in_season={IN_SEASON}")
 print("\n".join(notes + warnings + failures))
 hook = os.getenv("DISCORD_WEBHOOK_URL")
-if hook and (failures or warnings):
+body = None
+if failures or warnings:
     head = "🚨 **Fantasy pipeline health check failed**" if failures else "⚠️ **Fantasy pipeline health check: warnings**"
     body = head + "\n" + "\n".join(f"• {m}" for m in failures + warnings)
-    try:
-        requests.post(hook, json={"content": body[:1900]}, timeout=20)
-    except Exception as e:
-        print(f"(could not post to Discord: {e})")
+elif os.getenv("POST_SUMMARY") == "1":
+    # Optional "all clear" message. Off by default so a healthy pipeline stays silent.
+    body = f"✅ **Fantasy pipeline health check passed** ({len(notes)} checks, {TODAY})"
+if hook and body:
+    hook = hook.strip()
+    if not hook.startswith(("https://discord.com/api/webhooks/", "https://discordapp.com/api/webhooks/")):
+        # Never print the value itself: it may contain a token.
+        print("(DISCORD_WEBHOOK_URL is set but is not a Discord webhook URL. Re-create the secret with the URL itself.)")
+    else:
+        try:
+            r = requests.post(hook, json={"content": body[:1900]}, timeout=20)
+            print(f"Discord post: HTTP {r.status_code}")  # Discord returns 204 on success
+        except Exception as e:
+            # Log the error TYPE only: request errors can echo the URL, and the URL contains a token.
+            print(f"(could not post to Discord: {type(e).__name__})")
 if failures:
     sys.exit(1)
