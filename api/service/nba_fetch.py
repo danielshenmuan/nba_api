@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date as _date, timedelta as _timedelta
 from google.cloud import bigquery
 import os
 import pandas as pd
@@ -169,7 +170,7 @@ def get_daily_leaders(date, limit=10, mode="best", min_minutes: float = 0):
       , own.roster_pct
     FROM `{TABLE_FQN}` AS stats
     LEFT JOIN `fantasy-survivor-app.nba_data.v_player_ownership_latest` AS own
-      ON LOWER(stats.player_name) = LOWER(own.player_name)
+      ON stats.player_id = own.player_id  -- by ID: provider name spellings differ (accents, suffixes)
     WHERE stats.game_date = @date
       AND {minutes_expr} >= @min_minutes
       AND COALESCE(own.roster_pct, 0) >= @min_roster_pct
@@ -315,3 +316,95 @@ def get_player_roster_pct(
             df[column] = None
 
     return safe_records(df[output_columns])
+
+
+YAHOO_OWNERSHIP_FQN = "fantasy-survivor-app.nba_data.player_ownership"
+ESPN_OWNERSHIP_FQN = "fantasy-survivor-app.nba_data.player_ownership_espn"
+
+
+def _pick_ownership_source(client: bigquery.Client, source: str, as_of) -> str:
+    """Yahoo is primary, ESPN the fallback (Daniel, 2026-10-09): use Yahoo when its latest snapshot is <= 3 days old."""
+    if source in ("yahoo", "espn"):
+        return source
+    row = list(client.query(f"SELECT MAX(snapshot_date) AS d FROM `{YAHOO_OWNERSHIP_FQN}`").result())[0]
+    ref = as_of or _date.today()
+    return "yahoo" if row.d is not None and row.d >= ref - _timedelta(days=3) else "espn"
+
+
+def get_waiver_risers(
+    days: int = 3,
+    min_change: float = 5.0,
+    max_roster_pct: float = 50.0,
+    min_minutes: float = 24.0,
+    limit: int = 10,
+    source: str = "auto",
+    as_of=None,
+):
+    """Players whose ownership is rising AND who are playing real minutes.
+
+    Backtest (Yahoo ownership Oct 2025 - Feb 2026, players owned 5-50%): the rise itself predicts little. Among
+    players averaging 24+ minutes, rising ownership gave a next-7-day Fantasy Value of 1.16 vs 1.02 for flat
+    ownership, while "spike" risers on low or falling minutes fell to -0.58 (all-players baseline 0.42). The
+    minutes filter is what carries the signal, so min_minutes defaults to 24 and the caller is told the source.
+    """
+    client = get_client()
+    src = _pick_ownership_source(client, source, as_of)
+    table = ESPN_OWNERSHIP_FQN if src == "espn" else YAHOO_OWNERSHIP_FQN
+    own_cols = (
+        "player_id, player_name, roster_pct, snapshot_date, pct_change, injury_status"
+        if src == "espn"
+        else "player_id, player_name, roster_pct, snapshot_date, CAST(NULL AS FLOAT64) AS pct_change, CAST(NULL AS STRING) AS injury_status"
+    )
+    query = f"""
+    WITH own AS (SELECT {own_cols} FROM `{table}`),
+    d0 AS (SELECT MAX(snapshot_date) AS d FROM own WHERE snapshot_date <= COALESCE(@as_of, CURRENT_DATE('America/New_York'))),
+    prev_d AS (SELECT MAX(snapshot_date) AS d FROM own WHERE snapshot_date <= DATE_SUB((SELECT d FROM d0), INTERVAL @days DAY)),
+    cur AS (SELECT * FROM own WHERE snapshot_date = (SELECT d FROM d0)),
+    prv AS (
+      SELECT player_id, roster_pct AS prev_pct FROM own
+      WHERE snapshot_date = (SELECT d FROM prev_d) AND (SELECT d FROM prev_d) < (SELECT d FROM d0)
+    ),
+    games AS (
+      SELECT player_id, game_date, minutes, z_score, pts, reb, ast, stl, blk, fg3m, fg_pct, team_abbr, position,
+             ROW_NUMBER() OVER (PARTITION BY player_id ORDER BY game_date DESC) AS rn
+      FROM `{TABLE_FQN}`
+      WHERE game_date <= (SELECT d FROM d0) AND game_date > DATE_SUB((SELECT d FROM d0), INTERVAL 30 DAY)
+    ),
+    form AS (
+      SELECT player_id, COUNT(*) AS games_last5, AVG(minutes) AS min_last5, AVG(z_score) AS fantasy_value_last5,
+             AVG(pts) AS pts, AVG(reb) AS reb, AVG(ast) AS ast, AVG(stl) AS stl, AVG(blk) AS blk,
+             AVG(fg3m) AS fg3m, AVG(fg_pct) AS fg_pct, ANY_VALUE(team_abbr) AS team_abbr,
+             ANY_VALUE(position) AS position, MAX(game_date) AS last_game
+      FROM games WHERE rn <= 5 GROUP BY player_id
+    ),
+    prior AS (SELECT player_id, AVG(minutes) AS min_prior FROM games WHERE rn BETWEEN 6 AND 15 GROUP BY player_id)
+    SELECT
+      c.player_id, c.player_name, f.team_abbr, f.position,
+      c.roster_pct, p.prev_pct AS roster_pct_prev,
+      COALESCE(c.roster_pct - p.prev_pct, IF(@days = 1, c.pct_change, NULL)) AS change,
+      IF(p.prev_pct IS NOT NULL, 'snapshots', IF(@days = 1 AND c.pct_change IS NOT NULL, 'espn_pct_change', NULL)) AS change_basis,
+      c.snapshot_date, (SELECT d FROM prev_d) AS previous_snapshot_date,
+      f.games_last5, f.min_last5, pr.min_prior, f.min_last5 - pr.min_prior AS minutes_trend,
+      f.fantasy_value_last5, f.pts, f.reb, f.ast, f.stl, f.blk, f.fg3m, f.fg_pct, c.injury_status
+    FROM cur c
+    LEFT JOIN prv p USING (player_id)
+    JOIN form f USING (player_id)
+    LEFT JOIN prior pr USING (player_id)
+    WHERE c.roster_pct <= @max_pct
+      AND f.games_last5 >= 2
+      AND f.min_last5 >= @min_minutes
+      AND DATE_DIFF((SELECT d FROM d0), f.last_game, DAY) <= 10
+      AND COALESCE(c.roster_pct - p.prev_pct, IF(@days = 1, c.pct_change, NULL)) >= @min_change
+    ORDER BY change DESC, f.fantasy_value_last5 DESC
+    LIMIT @limit
+    """
+    cfg = bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ScalarQueryParameter("as_of", "DATE", as_of),
+        bigquery.ScalarQueryParameter("days", "INT64", int(days)),
+        bigquery.ScalarQueryParameter("min_change", "FLOAT64", float(min_change)),
+        bigquery.ScalarQueryParameter("max_pct", "FLOAT64", float(max_roster_pct)),
+        bigquery.ScalarQueryParameter("min_minutes", "FLOAT64", float(min_minutes)),
+        bigquery.ScalarQueryParameter("limit", "INT64", int(limit)),
+    ])
+    df = client.query(query, job_config=cfg).to_dataframe()
+    return src, safe_records(df)

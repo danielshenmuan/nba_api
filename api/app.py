@@ -10,6 +10,7 @@ import re
 from service.player_lookup import search_players
 from service.nba_fetch import (
     get_daily_leaders,
+    get_waiver_risers,
     get_player_roster_pct,
     get_player_time_series,
 )
@@ -198,4 +199,27 @@ def player_roster_pct_endpoint(
 
 
 # mount versioned router
+@v1.get("/waiver_risers", operation_id="getWaiverRisers")
+def waiver_risers(
+    days: int = Query(default=3, ge=1, le=14, description="Ownership change window in days"),
+    min_change: float = Query(default=5.0, ge=0, description="Minimum ownership gain in percentage points"),
+    max_roster_pct: float = Query(default=50.0, ge=0, le=100),
+    min_minutes: float = Query(default=24.0, ge=0, description="Minimum average minutes over the last 5 games"),
+    limit: int = Query(default=10, ge=1, le=50),
+    source: str = Query(default="auto", pattern=r"^(auto|yahoo|espn)$"),
+    as_of: Optional[date] = Query(default=None, description="Replay a past snapshot date (testing/backtests)"),
+):
+    """Players being added AND playing real minutes. Ownership alone is mostly the crowd reacting to a hot
+    stretch; the minutes filter carries the signal (see service docstring)."""
+    used, rows = get_waiver_risers(days, min_change, max_roster_pct, min_minutes, limit, source, as_of)
+    return sanitize_response({
+        "source": used,
+        "params": {"days": days, "min_change": min_change, "max_roster_pct": max_roster_pct,
+                   "min_minutes": min_minutes, "limit": limit, "as_of": str(as_of) if as_of else None},
+        "count": len(rows),
+        "risers": rows,
+        "note": "Ownership rise = managers are adding him. It is not a forecast; the 24+ minutes filter is what "
+                "historically separated risers who held up from one-game spikes.",
+    })
+
 app.include_router(v1)
