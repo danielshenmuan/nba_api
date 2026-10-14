@@ -11,6 +11,7 @@ from service.player_lookup import search_players
 from service.nba_fetch import (
     get_daily_leaders,
     get_waiver_risers,
+    get_waiver_wire,
     get_player_roster_pct,
     get_player_time_series,
 )
@@ -221,5 +222,18 @@ def waiver_risers(
         "note": "Ownership rise = managers are adding him. It is not a forecast; the 24+ minutes filter is what "
                 "historically separated risers who held up from one-game spikes.",
     })
+
+@v1.get("/waiver_wire", operation_id="getWaiverWire")
+def waiver_wire_endpoint(
+    as_of: Optional[date] = Query(default=None, description="Date the post is for (defaults to today, New York time). Past dates replay history."),
+    source: str = Query(default="auto", pattern=r"^(auto|yahoo|espn)$"),
+    k: int = Query(default=15, ge=3, le=30, description="Size of the 'top group' used to decide who is new"),
+    lag_days: int = Query(default=3, ge=1, le=7, description="Compare with the top group this many days earlier"),
+    dedupe_days: int = Query(default=5, ge=0, le=14, description="Do not repeat a player featured in the last N days (0 = off)"),
+):
+    """Waiver pickups ranked by recent level (not by ownership change), limited to players NEW to the top group or trending
+    up in ownership with the level to back it. Returns ready-to-review post text (zh-TW and en). Not a forecast."""
+    return sanitize_response(get_waiver_wire(as_of, source, k, lag_days, dedupe_days))
+
 
 app.include_router(v1)

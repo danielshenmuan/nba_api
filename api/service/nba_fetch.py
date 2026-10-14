@@ -408,3 +408,52 @@ def get_waiver_risers(
     ])
     df = client.query(query, job_config=cfg).to_dataframe()
     return src, safe_records(df)
+
+
+FEATURED_FQN = "fantasy-survivor-app.nba_data.waiver_wire_featured"
+
+
+def get_waiver_wire(as_of=None, source: str = "auto", k: int = 15, lag_days: int = 3, dedupe_days: int = 5):
+    """Waiver wire for one day: new names in the top group (by recent level) plus ownership risers with the level to back it.
+
+    All the rules live in service/waiver_wire.py (pure, unit-tested). This function only fetches: this season's games before
+    `as_of`, and roster % snapshots from ONE source (Yahoo when it is current, else ESPN) on `as_of` and `lag_days` earlier.
+    """
+    from dataclasses import replace
+    from service.waiver_wire import DEFAULT_RULES, SOURCE_LABEL, render_en, render_zh, waiver_wire_for_day
+
+    rules = replace(DEFAULT_RULES, top_k=int(k), lag_days=int(lag_days))
+    day = as_of or _date.today()
+    client = get_client()
+    cfg = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("as_of", "DATE", day)])
+    games = client.query(f"""
+        WITH latest AS (SELECT season FROM `{TABLE_FQN}` WHERE game_date < @as_of AND z_score IS NOT NULL ORDER BY game_date DESC LIMIT 1)
+        SELECT player_id, player_name, team_abbr, position, game_date, minutes, z_score, pts, reb, ast, stl, blk, fg3m
+        FROM `{TABLE_FQN}` WHERE season = (SELECT season FROM latest) AND game_date < @as_of AND z_score IS NOT NULL
+    """, job_config=cfg).to_dataframe()
+    base = {"source": None, "rules": {"top_k": rules.top_k, "lag_days": rules.lag_days, "own_min": rules.own_min, "own_max": rules.own_max,
+            "min_minutes": rules.min_minutes, "min_games": rules.min_games, "trend_min_rise": rules.trend_min_rise, "dedupe_days": int(dedupe_days)}}
+    if games.empty or (day - games["game_date"].max()).days > 14:
+        return {**base, "as_of": str(day), "post_worthy": False, "skip_reason": "offseason", "risers": [], "holdovers": [], "text_zh": "", "text_en": ""}
+    src = _pick_ownership_source(client, source, day)
+    table = ESPN_OWNERSHIP_FQN if src == "espn" else YAHOO_OWNERSHIP_FQN
+    inj = "injury_status" if src == "espn" else "CAST(NULL AS STRING) AS injury_status"
+    own = client.query(f"""
+        SELECT player_id, roster_pct, snapshot_date, {inj} FROM `{table}`
+        WHERE snapshot_date BETWEEN DATE_SUB(@as_of, INTERVAL {int(lag_days) + 12} DAY) AND @as_of AND roster_pct IS NOT NULL
+    """, job_config=cfg).to_dataframe()
+
+    featured_ids, featured_note = set(), "ok"
+    if int(dedupe_days) > 0:
+        try:   # players the publisher recorded as actually posted in the last N days
+            rows = client.query(f"SELECT DISTINCT player_id FROM `{FEATURED_FQN}` WHERE featured_date >= DATE_SUB(@as_of, INTERVAL {int(dedupe_days)} DAY) AND featured_date < @as_of",
+                                job_config=cfg).result()
+            featured_ids = {int(r.player_id) for r in rows}
+        except Exception:
+            featured_note = "ledger_unavailable"       # table missing or unreadable: do not block the post, but say so
+    res = waiver_wire_for_day(games, own, day, games["game_date"].min(), rules, exclude_ids=featured_ids)
+    out = {**base, "source": src, **res.to_dict()}
+    out["text_zh"], out["text_en"] = render_zh(res, src), render_en(res, src)
+    out["source_label"] = SOURCE_LABEL.get(src, src)
+    out["featured_ledger"] = {"status": featured_note, "excluded": sorted(featured_ids)}
+    return out
