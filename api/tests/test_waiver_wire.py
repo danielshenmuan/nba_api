@@ -145,25 +145,44 @@ class TestWaiverWire:
 
 
 class TestText:
-    def res(self):
-        return waiver_wire(scenario(), NOW, THEN, AS_OF, None, R)
+    def res(self, now=None):
+        return waiver_wire(scenario(), NOW if now is None else now, THEN, AS_OF, None, R)
 
     def test_zh_has_the_data_and_no_forecast_claims(self):
         t = render_zh(self.res(), "yahoo")
-        assert "Xray" in t and "擁有率 20%" in t and "近5場 FV +" in t and "Alpha、Bravo" in t and "不是預測" in t
+        assert "Xray" in t and "擁有率 20%" in t and "近5場平均" in t and "不是預測" in t
         assert "會" not in t.split("（擁有率括號")[0]       # no "will ..." in the body
+
+    def test_internal_metrics_never_appear(self):
+        for t in (render_zh(self.res(), "yahoo"), render_en(self.res(), "yahoo")):
+            assert "FV" not in t and "Fantasy Value" not in t and "level" not in t.lower()
+
+    def test_still_on_the_wire_shows_each_players_ownership(self):
+        assert "持續在榜：Alpha（20%）、Bravo（20%）" in render_zh(self.res(), "yahoo")
+        assert "Still on the wire: Alpha (20%), Bravo (20%)" in render_en(self.res(), "espn")
 
     def test_en_text(self):
         t = render_en(self.res(), "espn")
-        assert "Xray" in t and "Still on the wire: Alpha, Bravo" in t and "not a forecast" in t and "ESPN" in t
+        assert "Xray" in t and "not a forecast" in t and "ESPN" in t and "20 pts, 5 reb, 4 ast" in t
 
     def test_nothing_to_say_means_empty_text(self):
         r = waiver_wire(scenario(), NOW, THEN, AS_OF, AS_OF, Rules(top_k=3, min_risers=1))
         assert render_zh(r, "yahoo") == "" and render_en(r, "yahoo") == ""
 
-    def test_own_change_shown_with_sign(self):
-        now = own([(p, 20.0) for p in range(1, 9)]); now.loc[now.player_id == 4, "roster_pct"] = 31.0
-        assert "擁有率 31%（+11）" in render_zh(waiver_wire(scenario(), now, THEN, AS_OF, None, R), "yahoo")
+    def test_own_change_shown_only_for_a_real_rise(self):
+        def zh(pct):
+            now = own([(p, 20.0) for p in range(1, 9)]); now.loc[now.player_id == 4, "roster_pct"] = pct
+            return render_zh(self.res(now), "yahoo")
+        assert "擁有率 31%（+11）" in zh(31.0)
+        assert "擁有率 22%（+2）" in zh(22.0)           # exactly the threshold is shown
+        assert "擁有率 21%\n" in zh(21.0) and "+1" not in zh(21.0)       # +1 is noise
+        assert "擁有率 19%\n" in zh(19.0) and "-1" not in zh(19.0)       # falls are never shown
+
+    def test_standout_steals_blocks_threes_are_shown_at_most_two(self):
+        r = {"name": "N", "team": "T", "roster_pct": 20.0, "own_change": None, "pts": 10.0, "reb": 5.0, "ast": 2.0, "stl": 2.0, "blk": 2.5, "fg3m": 3.0, "minutes_last5": 30.0}
+        from service.waiver_wire import _extras
+        assert _extras(r) == ["2.5阻攻", "2.0抄截"] and _extras(r, False) == ["2.5 blk", "2.0 stl"]
+        assert _extras({**r, "stl": 0.5, "blk": 0.5, "fg3m": 1.0}) == []
 
 
 from service.waiver_wire import latest_snapshot, waiver_wire_for_day  # noqa: E402
