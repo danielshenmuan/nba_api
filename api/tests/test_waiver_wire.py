@@ -150,8 +150,8 @@ class TestText:
 
     def test_zh_has_the_data_and_no_forecast_claims(self):
         t = render_zh(self.res(), "yahoo")
-        assert "Xray" in t and "擁有率 20%" in t and "近5場平均" in t and "不是預測" in t
-        assert "會" not in t.split("（擁有率括號")[0]       # no "will ..." in the body
+        assert "Xray" in t and "持有率 20%" in t and "近5場平均" in t and "不是預測" in t
+        assert "會" not in t.split("（持有率括號")[0]       # no "will ..." in the body
 
     def test_internal_metrics_never_appear(self):
         for t in (render_zh(self.res(), "yahoo"), render_en(self.res(), "yahoo")):
@@ -173,10 +173,10 @@ class TestText:
         def zh(pct):
             now = own([(p, 20.0) for p in range(1, 9)]); now.loc[now.player_id == 4, "roster_pct"] = pct
             return render_zh(self.res(now), "yahoo")
-        assert "擁有率 31%（+11）" in zh(31.0)
-        assert "擁有率 22%（+2）" in zh(22.0)           # exactly the threshold is shown
-        assert "擁有率 21%\n" in zh(21.0) and "+1" not in zh(21.0)       # +1 is noise
-        assert "擁有率 19%\n" in zh(19.0) and "-1" not in zh(19.0)       # falls are never shown
+        assert "持有率 31%（+11）" in zh(31.0)
+        assert "持有率 22%（+2）" in zh(22.0)           # exactly the threshold is shown
+        assert "持有率 21%\n" in zh(21.0) and "+1" not in zh(21.0)       # +1 is noise
+        assert "持有率 19%\n" in zh(19.0) and "-1" not in zh(19.0)       # falls are never shown
 
     def test_standout_steals_blocks_threes_are_shown_at_most_two(self):
         r = {"name": "N", "team": "T", "roster_pct": 20.0, "own_change": None, "pts": 10.0, "reb": 5.0, "ast": 2.0, "stl": 2.0, "blk": 2.5, "fg3m": 3.0, "minutes_last5": 30.0}

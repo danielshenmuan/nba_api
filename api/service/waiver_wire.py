@@ -218,13 +218,13 @@ def render_zh(res: WireResult, source: str) -> str:
     if not res.post_worthy:
         return ""
     d = res.as_of
-    lines = [f"🔥 Waiver Wire 新面孔｜{d.month}/{d.day}", "擁有率低於50%，近況和上場時間都撐得住：", ""]
+    lines = [f"🔥 自由市場推薦名單｜{d.month}/{d.day}", "持有率低於50%，近況和上場時間都撐得住：", ""]
     for i, r in enumerate(res.risers, 1):
-        lines.append(f"{i}. {r['name']}（{r['team']}）擁有率 {_own(r)}")
+        lines.append(f"{i}. {r['name']}（{r['team']}）持有率 {_own(r)}")
         lines.append("   近5場平均 " + "｜".join([f"{r['pts']:.0f}分 {r['reb']:.0f}板 {r['ast']:.0f}助"] + _extras(r) + [f"{r['minutes_last5']:.0f}分鐘"]))
     if res.holdovers:
         lines += ["", "📌 持續在榜：" + "、".join(_wire(h) for h in res.holdovers[:3])]
-    lines += ["", f"（擁有率括號為近3天增加的百分點，資料來源 {SOURCE_LABEL.get(source, source)}；只是近況，不是預測）"]
+    lines += ["", f"（持有率括號為近3天增加的百分點，資料來源 {SOURCE_LABEL.get(source, source)}；只是近況，不是預測）"]
     return "\n".join(lines)
 
 
