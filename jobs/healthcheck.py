@@ -24,7 +24,8 @@ from google.cloud import bigquery
 PROJECT = os.getenv("PROJECT_ID", "fantasy-survivor-app")
 LOC = "northamerica-northeast1"
 API = os.getenv("API_BASE", "https://nba-gbq-api-896368614747.us-central1.run.app")
-SEASON_START = date.fromisoformat(os.getenv("SEASON_START", "2026-10-20"))
+# First morning after opening night (2026-10-20): games for yesterday exist from here on. Not opening day itself.
+SEASON_START = date.fromisoformat(os.getenv("SEASON_START", "2026-10-21"))
 SEASON_END = date.fromisoformat(os.getenv("SEASON_END", "2027-04-12"))
 GAMES_MAX_AGE_DAYS = int(os.getenv("GAMES_MAX_AGE_DAYS", "3"))  # All-Star break is the longest legit gap
 TODAY = datetime.now(ZoneInfo("America/New_York")).date()
