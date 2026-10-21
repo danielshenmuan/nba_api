@@ -457,3 +457,10 @@ def get_waiver_wire(as_of=None, source: str = "auto", k: int = 15, lag_days: int
     out["source_label"] = SOURCE_LABEL.get(src, src)
     out["featured_ledger"] = {"status": featured_note, "excluded": sorted(featured_ids)}
     return out
+
+
+def get_game_lines(date, names: list[str]):
+    """Box-score lines for specific players on one night (same fields as /v1/daily_leaders), matched by name."""
+    from service.player_names import match_players
+    rows = get_daily_leaders(date, limit=600, mode="best", min_minutes=0)
+    return match_players(rows, names)

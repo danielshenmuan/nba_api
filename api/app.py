@@ -3,7 +3,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from datetime import date, datetime, timedelta
-from typing import Optional
+from typing import List, Optional
 import math
 import re
 
@@ -12,6 +12,7 @@ from service.nba_fetch import (
     get_daily_leaders,
     get_waiver_risers,
     get_waiver_wire,
+    get_game_lines,
     get_player_roster_pct,
     get_player_time_series,
 )
@@ -234,6 +235,17 @@ def waiver_wire_endpoint(
     """Waiver pickups ranked by recent level (not by ownership change), limited to players NEW to the top group or trending
     up in ownership with the level to back it. Returns ready-to-review post text (zh-TW and en). Not a forecast."""
     return sanitize_response(get_waiver_wire(as_of, source, k, lag_days, dedupe_days))
+
+
+@v1.get("/game_lines", operation_id="getGameLines")
+def game_lines(
+    game_date: date = Query(..., description="The night, YYYY-MM-DD"),
+    name: List[str] = Query(default=[], description="Player full names; repeat the parameter for several. Accents and suffixes are ignored."),
+):
+    """Box-score lines for named players on one night. Names that do not match exactly one player are returned in
+    not_found / ambiguous instead of being guessed."""
+    out = get_game_lines(game_date, [n for n in name if n and n.strip()][:10])
+    return JSONResponse(content=jsonable_encoder(sanitize_response({"game_date": str(game_date), **out})))
 
 
 app.include_router(v1)
