@@ -56,7 +56,7 @@ upsert_schedule() {  # job_name schedule
 }
 
 upsert_job nba-espn-ingest espn_ingest.py daily 900s
-upsert_schedule nba-espn-ingest "30 2 * * *"     # after games are final; SportsBlaze runs at 01:00 ET
+upsert_schedule nba-espn-ingest "15 1 * * *"     # 01:15 ET; re-ingests the last two days, so a late finish is picked up the next night
 
 HC_EXTRA=()
 if gcloud secrets describe discord-webhook-url --project "${PROJECT_ID}" >/dev/null 2>&1; then
@@ -66,4 +66,4 @@ upsert_job nba-api-healthcheck healthcheck.py "" 300s ${HC_EXTRA[@]+"${HC_EXTRA[
 upsert_schedule nba-api-healthcheck "0 8 * * *"      # after both ingests
 
 echo
-echo "Deployed nba-espn-ingest (02:30 ET) and nba-api-healthcheck (08:00 ET) using ${IMAGE_URI}"
+echo "Deployed nba-espn-ingest (01:15 ET) and nba-api-healthcheck (08:00 ET) using ${IMAGE_URI}"

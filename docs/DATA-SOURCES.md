@@ -123,7 +123,7 @@ ESPN's **unofficial** site API (the JSON its own site and app call). No SLA. Dis
 |---|---|
 | Ingest | `jobs/espn_ingest.py` (`games`, `ownership`, `daily`, `seed-universe`, `repair-ids`) |
 | Health check | `jobs/healthcheck.py` — exits non-zero on failure; optional Discord webhook |
-| Deploy | `jobs/deploy_espn_jobs.sh` — creates `nba-espn-ingest` (02:30 ET) and `nba-api-healthcheck` (08:00 ET) |
+| Deploy | `jobs/deploy_espn_jobs.sh` — creates `nba-espn-ingest` (01:15 ET) and `nba-api-healthcheck` (08:00 ET) |
 | Endpoints | `site.api.espn.com/apis/site/v2/sports/basketball/nba/{scoreboard,summary}` · `lm-api-reads.fantasy.espn.com/apis/v3/games/fba/seasons/{year}/segments/0/leaguedefaults/3?view=kona_player_info` |
 
 | Table | Contents | Notes |
