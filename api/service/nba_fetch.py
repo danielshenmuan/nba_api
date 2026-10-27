@@ -112,8 +112,33 @@ def safe_records(df: pd.DataFrame):
     df = df.replace([np.inf, -np.inf], np.nan)       # replace +/- inf with NaN
     return df.where(df.notnull(), None).to_dict("records")  # NaN -> None
 
-def get_daily_leaders(date, limit=10, mode="best", min_minutes: float = 0):
+SOCIAL_TABLE_FQN = f"{PROJECT_ID}.{DATASET}.v_player_daily_game_stats_social"
+
+
+def leader_query_plan(mode: str, rank_by: str = "fv", min_roster_pct=None) -> dict:
+    """Which table, score column, direction and ownership floor a leaders query uses. Pure, so it is unit-tested.
+
+    rank_by "fv" is the original Fantasy Value (z_score); "social" is the social score (steals, blocks and threes at half
+    weight) that ranks every social post. The cold list's ownership floor defaults to 20%; callers can raise it.
+    """
+    if mode not in ("best", "worst"):
+        raise ValueError(f"mode must be best or worst, not {mode!r}")
+    if rank_by not in ("fv", "social"):
+        raise ValueError(f"rank_by must be fv or social, not {rank_by!r}")
+    default_floor = 0.0 if mode == "best" else 20.0
+    social = rank_by == "social"
+    return {
+        "table": SOCIAL_TABLE_FQN if social else TABLE_FQN,
+        "score": "social_score" if social else "z_score",
+        "direction": "DESC" if mode == "best" else "ASC",
+        "min_roster_pct": default_floor if min_roster_pct is None else float(min_roster_pct),
+        "extra_select": ", stats.social_score" if social else "",
+    }
+
+
+def get_daily_leaders(date, limit=10, mode="best", min_minutes: float = 0, rank_by: str = "fv", min_roster_pct=None):
     client = get_client()
+    plan = leader_query_plan(mode, rank_by, min_roster_pct)
 
     requested_columns: list[tuple[str, bool]] = [
         ("player_id", True),
@@ -160,21 +185,19 @@ def get_daily_leaders(date, limit=10, mode="best", min_minutes: float = 0):
             f"BigQuery table {TABLE_FQN} does not expose a minutes column."
         )
 
-    order_direction = "DESC" if mode == "best" else "ASC"
-    min_roster_pct = 0.0 if mode == "best" else 20.0
     minutes_expr = f"stats.{minutes_column}"
 
     query = f"""
     SELECT
-      {select_clause}
+      {select_clause}{plan["extra_select"]}
       , own.roster_pct
-    FROM `{TABLE_FQN}` AS stats
+    FROM `{plan["table"]}` AS stats
     LEFT JOIN `fantasy-survivor-app.nba_data.v_player_ownership_latest` AS own
       ON stats.player_id = own.player_id  -- by ID: provider name spellings differ (accents, suffixes)
     WHERE stats.game_date = @date
       AND {minutes_expr} >= @min_minutes
       AND COALESCE(own.roster_pct, 0) >= @min_roster_pct
-    ORDER BY stats.z_score {order_direction}
+    ORDER BY stats.{plan["score"]} {plan["direction"]}
     LIMIT @limit
     """
 
@@ -183,7 +206,7 @@ def get_daily_leaders(date, limit=10, mode="best", min_minutes: float = 0):
             bigquery.ScalarQueryParameter("date", "DATE", date),
             bigquery.ScalarQueryParameter("limit", "INT64", limit),
             bigquery.ScalarQueryParameter("min_minutes", "FLOAT64", float(min_minutes)),
-            bigquery.ScalarQueryParameter("min_roster_pct", "FLOAT64", min_roster_pct),
+            bigquery.ScalarQueryParameter("min_roster_pct", "FLOAT64", plan["min_roster_pct"]),
         ]
     )
     df = client.query(query, job_config=job_config).to_dataframe()
@@ -195,7 +218,7 @@ def get_daily_leaders(date, limit=10, mode="best", min_minutes: float = 0):
     if "roster_pct" not in df.columns:
         df["roster_pct"] = None
 
-    output_columns = [name for name, _ in requested_columns] + ["roster_pct"]
+    output_columns = [name for name, _ in requested_columns] + (["social_score"] if rank_by == "social" else []) + ["roster_pct"]
     return safe_records(df[output_columns])
 
 def get_player_time_series(player_id, start_date=None, end_date=None):
@@ -428,8 +451,8 @@ def get_waiver_wire(as_of=None, source: str = "auto", k: int = 15, lag_days: int
     cfg = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("as_of", "DATE", day)])
     games = client.query(f"""
         WITH latest AS (SELECT season FROM `{TABLE_FQN}` WHERE game_date < @as_of AND z_score IS NOT NULL ORDER BY game_date DESC LIMIT 1)
-        SELECT player_id, player_name, team_abbr, position, game_date, minutes, z_score, pts, reb, ast, stl, blk, fg3m
-        FROM `{TABLE_FQN}` WHERE season = (SELECT season FROM latest) AND game_date < @as_of AND z_score IS NOT NULL
+        SELECT player_id, player_name, team_abbr, position, game_date, minutes, social_score AS z_score, pts, reb, ast, stl, blk, fg3m
+        FROM `{SOCIAL_TABLE_FQN}` WHERE season = (SELECT season FROM latest) AND game_date < @as_of AND social_score IS NOT NULL   -- the social score ranks all social posts
     """, job_config=cfg).to_dataframe()
     base = {"source": None, "rules": {"top_k": rules.top_k, "lag_days": rules.lag_days, "own_min": rules.own_min, "own_max": rules.own_max,
             "min_minutes": rules.min_minutes, "min_games": rules.min_games, "trend_min_rise": rules.trend_min_rise, "dedupe_days": int(dedupe_days)}}

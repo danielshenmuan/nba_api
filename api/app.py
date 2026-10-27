@@ -87,13 +87,17 @@ def daily_leaders(
     limit: int = Query(default=10, ge=1, le=50),
     mode: str = Query(default="best", pattern=r"^(best|worst)$"),
     min_minutes: int = Query(default=20, ge=0),
+    rank_by: str = Query(default="fv", pattern=r"^(fv|social)$", description="fv = Fantasy Value (default); social = the score that ranks social posts"),
+    min_roster_pct: Optional[float] = Query(default=None, ge=0, le=100, description="Ownership floor; default 0 for best, 20 for worst"),
 ):
-    leaders = get_daily_leaders(game_date, limit, mode, min_minutes=min_minutes)
+    leaders = get_daily_leaders(game_date, limit, mode, min_minutes=min_minutes, rank_by=rank_by, min_roster_pct=min_roster_pct)
 
     payload = {
         "date": str(game_date),
         "limit": limit,
         "mode": mode,
+        "rank_by": rank_by,
+        "min_roster_pct": 20.0 if (mode == "worst" and min_roster_pct is None) else (0.0 if min_roster_pct is None else min_roster_pct),
         "min_minutes": min_minutes,
         "leaders": leaders,
     }
