@@ -169,7 +169,6 @@ def waiver_wire(games: pd.DataFrame, own_now: pd.DataFrame, own_then: pd.DataFra
 
 # --------------------------------------------------------------------------- text
 SOURCE_LABEL = {"yahoo": "Yahoo", "espn": "ESPN"}
-MIN_RISE_SHOWN = 2.0      # smaller changes are noise ("+0", "-1") and are not shown
 
 
 def latest_snapshot(ownership: pd.DataFrame, target: date, tolerance: int = 2) -> pd.DataFrame:
@@ -191,15 +190,6 @@ def waiver_wire_for_day(games: pd.DataFrame, ownership: pd.DataFrame, as_of: dat
                        as_of, season_start, rules, exclude_ids=exclude_ids)
 
 
-def _own(r: dict, zh: bool = True) -> str:
-    """Roster % with the 3-day change in brackets, only when it is a real rise."""
-    base = f"{r['roster_pct']:.0f}%"
-    ch = r.get("own_change")
-    if ch is None or ch < MIN_RISE_SHOWN:
-        return base
-    return f"{base}（{ch:+.0f}）" if zh else f"{base} ({ch:+.0f})"
-
-
 def _extras(r: dict, zh: bool = True) -> list[str]:
     """Standout steals / blocks / threes (last-5 averages), so a pick that is not obvious from pts/reb/ast is explained."""
     out = []
@@ -209,22 +199,19 @@ def _extras(r: dict, zh: bool = True) -> list[str]:
     return out[:2]
 
 
-def _wire(h: dict) -> str:
-    return f"{h['name']}（{h['roster_pct']:.0f}%）"
-
-
 def render_zh(res: WireResult, source: str) -> str:
-    """Traditional Chinese Threads post. No forecast wording, no internal metrics; numbers are copied from the data."""
+    """Traditional Chinese Threads post. No forecast wording, no internal metrics, and NO ownership percentages
+    (ESPN's differ a lot from Yahoo's, so showing them would mislead). Numbers are copied from the data."""
     if not res.post_worthy:
         return ""
     d = res.as_of
-    lines = [f"🔥 自由市場推薦名單｜{d.month}/{d.day}", "持有率低於50%，近況和上場時間都撐得住：", ""]
+    lines = [f"🔥 自由市場推薦名單｜{d.month}/{d.day}", ""]
     for i, r in enumerate(res.risers, 1):
-        lines.append(f"{i}. {r['name']}（{r['team']}）持有率 {_own(r)}")
+        lines.append(f"{i}. {r['name']}（{r['team']}）")
         lines.append("   近5場平均 " + "｜".join([f"{r['pts']:.0f}分 {r['reb']:.0f}板 {r['ast']:.0f}助"] + _extras(r) + [f"{r['minutes_last5']:.0f}分鐘"]))
     if res.holdovers:
-        lines += ["", "📌 持續在榜：" + "、".join(_wire(h) for h in res.holdovers[:3])]
-    lines += ["", f"（持有率括號為近3天增加的百分點，資料來源 {SOURCE_LABEL.get(source, source)}；只是近況，不是預測）"]
+        lines += ["", "📌 持續在榜：" + "、".join(h["name"] for h in res.holdovers[:3])]
+    lines += ["", "（只是近況，不是預測）"]
     return "\n".join(lines)
 
 
@@ -232,11 +219,11 @@ def render_en(res: WireResult, source: str) -> str:
     if not res.post_worthy:
         return ""
     d = res.as_of
-    lines = [f"🔥 Waiver Wire: new names | {d.month}/{d.day}", "Under 50% rostered, and the form and minutes hold up:", ""]
+    lines = [f"🔥 Waiver Wire: new names | {d.month}/{d.day}", ""]
     for i, r in enumerate(res.risers, 1):
-        lines.append(f"{i}. {r['name']} ({r['team']}) {_own(r, False)} rostered")
+        lines.append(f"{i}. {r['name']} ({r['team']})")
         lines.append("   Last 5 avg: " + " | ".join([f"{r['pts']:.0f} pts, {r['reb']:.0f} reb, {r['ast']:.0f} ast"] + _extras(r, False) + [f"{r['minutes_last5']:.0f} min"]))
     if res.holdovers:
-        lines += ["", "Still on the wire: " + ", ".join(f"{h['name']} ({h['roster_pct']:.0f}%)" for h in res.holdovers[:3])]
-    lines += ["", f"(Bracket = points gained in roster % over 3 days, via {SOURCE_LABEL.get(source, source)}. Recent form, not a forecast.)"]
+        lines += ["", "Still on the wire: " + ", ".join(h["name"] for h in res.holdovers[:3])]
+    lines += ["", "(Recent form, not a forecast.)"]
     return "\n".join(lines)
