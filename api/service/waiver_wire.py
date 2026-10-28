@@ -211,7 +211,6 @@ def render_zh(res: WireResult, source: str) -> str:
         lines.append("   近5場平均 " + "｜".join([f"{r['pts']:.0f}分 {r['reb']:.0f}板 {r['ast']:.0f}助"] + _extras(r) + [f"{r['minutes_last5']:.0f}分鐘"]))
     if res.holdovers:
         lines += ["", "📌 持續在榜：" + "、".join(h["name"] for h in res.holdovers[:3])]
-    lines += ["", "（只是近況，不是預測）"]
     return "\n".join(lines)
 
 
@@ -225,5 +224,4 @@ def render_en(res: WireResult, source: str) -> str:
         lines.append("   Last 5 avg: " + " | ".join([f"{r['pts']:.0f} pts, {r['reb']:.0f} reb, {r['ast']:.0f} ast"] + _extras(r, False) + [f"{r['minutes_last5']:.0f} min"]))
     if res.holdovers:
         lines += ["", "Still on the wire: " + ", ".join(h["name"] for h in res.holdovers[:3])]
-    lines += ["", "(Recent form, not a forecast.)"]
     return "\n".join(lines)

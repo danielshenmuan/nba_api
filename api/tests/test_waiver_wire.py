@@ -153,7 +153,8 @@ class TestText:
         lines = t.split("\n")
         assert lines[0] == "🔥 自由市場推薦名單｜11/10" and lines[1] == "" and lines[2] == "1. Xray（AAA）"
         assert lines[3].startswith("   近5場平均 ") and "分鐘" in lines[3]
-        assert lines[-1] == "（只是近況，不是預測）"
+        assert "不是預測" not in t and "（只是" not in t                                  # no disclaimer or footnote
+        assert lines[-1].startswith("   近5場平均 ") or lines[-1].startswith("📌 持續在榜：")   # the post ends with content, not a note
         assert "持有率低於50%" not in t and "近況和上場時間都撐得住" not in t           # the old subtitle line is gone
 
     def test_ownership_never_appears_in_any_text(self):
@@ -179,7 +180,7 @@ class TestText:
         t = render_en(self.res(), "espn")
         lines = t.split("\n")
         assert lines[0] == "🔥 Waiver Wire: new names | 11/10" and lines[1] == "" and lines[2] == "1. Xray (AAA)"
-        assert "20 pts, 5 reb, 4 ast" in t and lines[-1] == "(Recent form, not a forecast.)"
+        assert "20 pts, 5 reb, 4 ast" in t and "forecast" not in t.lower() and "(Recent" not in t and lines[-1].startswith("Still on the wire:")
         assert "Under 50% rostered" not in t
 
     def test_nothing_to_say_means_empty_text(self):
