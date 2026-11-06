@@ -119,21 +119,35 @@ def leader_query_plan(mode: str, rank_by: str = "fv", min_roster_pct=None) -> di
     """Which table, score column, direction and ownership floor a leaders query uses. Pure, so it is unit-tested.
 
     rank_by "fv" is the original Fantasy Value (z_score); "social" is the social score (steals, blocks and threes at half
-    weight) that ranks every social post. The cold list's ownership floor defaults to 20%; callers can raise it.
+    weight) that ranks every social post; "cold" is the cold score that ranks the 爆胎榜 (efficiency, turnovers and fouls
+    count more, steals/blocks/assists less). The cold list's ownership floor defaults to 20%; callers can raise it.
     """
     if mode not in ("best", "worst"):
         raise ValueError(f"mode must be best or worst, not {mode!r}")
-    if rank_by not in ("fv", "social"):
-        raise ValueError(f"rank_by must be fv or social, not {rank_by!r}")
+    if rank_by not in ("fv", "social", "cold"):
+        raise ValueError(f"rank_by must be fv, social or cold, not {rank_by!r}")
     default_floor = 0.0 if mode == "best" else 20.0
-    social = rank_by == "social"
+    social = rank_by in ("social", "cold")
+    score = {"fv": "z_score", "social": "social_score", "cold": "cold_score"}[rank_by]
     return {
         "table": SOCIAL_TABLE_FQN if social else TABLE_FQN,
-        "score": "social_score" if social else "z_score",
+        "score": score,
         "direction": "DESC" if mode == "best" else "ASC",
         "min_roster_pct": default_floor if min_roster_pct is None else float(min_roster_pct),
-        "extra_select": ", stats.social_score" if social else "",
+        "extra_select": f", stats.{score}" if social else "",
     }
+
+
+def split_low_owned(pool: list[dict], top_n: int, low_n: int, max_pct: float = 50.0, min_score: float = 3.0) -> tuple[list[dict], list[dict]]:
+    """The hot list as "top N by score" plus a 低持有專區: the best `low_n` nights among players below `max_pct` ownership
+    (unknown ownership counts as 0, like the ownership floor does) whose social score is at least `min_score`.
+    `pool` is best-first. If fewer than `low_n` qualify, the main list is extended with the next best players instead."""
+    top, rest = list(pool[:top_n]), pool[top_n:]
+    low = [r for r in rest if (r.get("roster_pct") or 0) < max_pct and (r.get("social_score") if r.get("social_score") is not None else -1e9) >= min_score][:low_n]
+    if len(low) < low_n:
+        taken = {id(r) for r in low}
+        top += [r for r in rest if id(r) not in taken][: low_n - len(low)]
+    return top, low
 
 
 def get_daily_leaders(date, limit=10, mode="best", min_minutes: float = 0, rank_by: str = "fv", min_roster_pct=None):
@@ -218,7 +232,7 @@ def get_daily_leaders(date, limit=10, mode="best", min_minutes: float = 0, rank_
     if "roster_pct" not in df.columns:
         df["roster_pct"] = None
 
-    output_columns = [name for name, _ in requested_columns] + (["social_score"] if rank_by == "social" else []) + ["roster_pct"]
+    output_columns = [name for name, _ in requested_columns] + ({"social": ["social_score"], "cold": ["cold_score"]}.get(rank_by, [])) + ["roster_pct"]
     return safe_records(df[output_columns])
 
 def get_player_time_series(player_id, start_date=None, end_date=None):
@@ -486,4 +500,39 @@ def get_game_lines(date, names: list[str]):
     """Box-score lines for specific players on one night (same fields as /v1/daily_leaders), matched by name."""
     from service.player_names import match_players
     rows = get_daily_leaders(date, limit=600, mode="best", min_minutes=0)
-    return match_players(rows, names)
+    out = match_players(rows, names)
+    if out["not_found"]:
+        out = classify_missing(out, _recent_players(date))
+    else:
+        out["no_game"] = []
+    return out
+
+
+def classify_missing(out: dict, known: list[dict]) -> dict:
+    """Splits `not_found` into names the database has never heard of (still not_found) and real players with no box score
+    on this date (no_game: they did not play, or the night's data is not in yet). Pure."""
+    from service.player_names import match_players
+    not_found, ambiguous, no_game = [], list(out["ambiguous"]), []
+    for q in out["not_found"]:
+        m = match_players(known, [q])
+        if m["lines"]:
+            r = m["lines"][0]
+            no_game.append({"query": q, "player_name": r["player_name"], "team": r.get("team_abbr"), "last_game_date": str(r.get("last_game_date"))})
+        elif m["ambiguous"]:
+            ambiguous.append(q)
+        else:
+            not_found.append(q)
+    return {**out, "not_found": not_found, "ambiguous": ambiguous, "no_game": no_game}
+
+
+def _recent_players(date) -> list[dict]:
+    """Every player with a box score in the 120 days before `date`, with his latest team and last game."""
+    client = get_client()
+    q = f"""
+    SELECT player_name, ARRAY_AGG(team_abbr ORDER BY game_date DESC LIMIT 1)[OFFSET(0)] AS team_abbr, MAX(game_date) AS last_game_date
+    FROM `{TABLE_FQN}`
+    WHERE game_date >= DATE_SUB(@date, INTERVAL 120 DAY)
+    GROUP BY player_id, player_name
+    """
+    cfg = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("date", "DATE", date)])
+    return safe_records(client.query(q, job_config=cfg).to_dataframe())

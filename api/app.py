@@ -10,6 +10,7 @@ import re
 from service.player_lookup import search_players
 from service.nba_fetch import (
     get_daily_leaders,
+    split_low_owned,
     get_waiver_risers,
     get_waiver_wire,
     get_game_lines,
@@ -87,10 +88,20 @@ def daily_leaders(
     limit: int = Query(default=10, ge=1, le=50),
     mode: str = Query(default="best", pattern=r"^(best|worst)$"),
     min_minutes: int = Query(default=20, ge=0),
-    rank_by: str = Query(default="fv", pattern=r"^(fv|social)$", description="fv = Fantasy Value (default); social = the score that ranks social posts"),
+    rank_by: str = Query(default="fv", pattern=r"^(fv|social|cold)$", description="fv = Fantasy Value (default); social = the score that ranks social posts; cold = the score that ranks the 爆胎榜"),
     min_roster_pct: Optional[float] = Query(default=None, ge=0, le=100, description="Ownership floor; default 0 for best, 20 for worst"),
+    low_owned: int = Query(default=0, ge=0, le=10, description="best only: also return this many 低持有專區 players (below low_owned_max_pct ownership, score >= low_owned_min_score) in `low_owned`"),
+    low_owned_max_pct: float = Query(default=50.0, ge=0, le=100),
+    low_owned_min_score: float = Query(default=3.0),
 ):
-    leaders = get_daily_leaders(game_date, limit, mode, min_minutes=min_minutes, rank_by=rank_by, min_roster_pct=min_roster_pct)
+    if low_owned and (mode != "best" or rank_by == "fv"):
+        raise HTTPException(status_code=422, detail="low_owned needs mode=best and rank_by=social")
+    low = None
+    if low_owned:
+        pool = get_daily_leaders(game_date, 100, mode, min_minutes=min_minutes, rank_by=rank_by, min_roster_pct=min_roster_pct)
+        leaders, low = split_low_owned(pool, limit, low_owned, low_owned_max_pct, low_owned_min_score)
+    else:
+        leaders = get_daily_leaders(game_date, limit, mode, min_minutes=min_minutes, rank_by=rank_by, min_roster_pct=min_roster_pct)
 
     payload = {
         "date": str(game_date),
@@ -100,6 +111,7 @@ def daily_leaders(
         "min_roster_pct": 20.0 if (mode == "worst" and min_roster_pct is None) else (0.0 if min_roster_pct is None else min_roster_pct),
         "min_minutes": min_minutes,
         "leaders": leaders,
+        **({"low_owned": low, "low_owned_rule": {"max_roster_pct": low_owned_max_pct, "min_social_score": low_owned_min_score}} if low is not None else {}),
     }
     return JSONResponse(
         content=jsonable_encoder(sanitize_response(payload)),
