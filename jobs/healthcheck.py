@@ -92,6 +92,17 @@ if row.n:
     check(rate < 0.05, f"unresolved ids {rate:.1%} of {row.n} recent lines",
           f"unresolved ids {rate:.1%} of {row.n} recent lines (>5%): refresh nba_player_universe")
 
+# 5. Analyst snapshot (public file the skill and connector read): exists, fresh, sane size
+SNAPSHOT_URL = os.getenv("SNAPSHOT_URL", "https://storage.googleapis.com/fantasy-survivors-analyst-data/snapshot.json")
+try:
+    snap = requests.get(SNAPSHOT_URL, timeout=30).json()
+    age_h = (datetime.now(ZoneInfo("UTC")) - datetime.fromisoformat(snap["generated_at"].replace("Z", "+00:00"))).total_seconds() / 3600
+    check(age_h <= 36 and len(snap["players"]) >= 400,
+          f"analyst snapshot fresh ({age_h:.0f}h old, {len(snap['players'])} players)",
+          f"analyst snapshot stale or small: {age_h:.0f}h old, {len(snap['players'])} players")
+except Exception as e:
+    check(False, "", f"analyst snapshot unreadable at {SNAPSHOT_URL}: {type(e).__name__}")
+
 print(f"{TODAY} in_season={IN_SEASON}")
 print("\n".join(notes + warnings + failures))
 hook = os.getenv("DISCORD_WEBHOOK_URL")

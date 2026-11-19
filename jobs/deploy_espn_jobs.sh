@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Build the jobs image once and create-or-update two Cloud Run jobs + schedulers:
 #   nba-espn-ingest   python espn_ingest.py daily   (yesterday's games + today's ownership)
+#   nba-snapshot-export   python snapshot_export.py --out gs://...   (nightly file for the Fantasy Analyst skill)
 #   nba-api-healthcheck   python healthcheck.py         (fails the run if the pipeline is unhealthy)
 #
 # Additive: writes only to the *_espn tables. Does not touch nba-daily-ingest.
@@ -57,6 +58,9 @@ upsert_schedule() {  # job_name schedule
 
 upsert_job nba-espn-ingest espn_ingest.py daily 900s
 upsert_schedule nba-espn-ingest "15 1 * * *"     # 01:15 ET; re-ingests the last two days, so a late finish is picked up the next night
+
+upsert_job nba-snapshot-export snapshot_export.py "--out,gs://fantasy-survivors-analyst-data/snapshot.json" 300s
+upsert_schedule nba-snapshot-export "20 1 * * *"   # 01:20 ET: after the 01:15 ingest (900s timeout, so give it time) and before the 01:25 social flows
 
 HC_EXTRA=()
 if gcloud secrets describe discord-webhook-url --project "${PROJECT_ID}" >/dev/null 2>&1; then
