@@ -100,6 +100,15 @@ try:
     check(age_h <= 36 and len(snap["players"]) >= 400,
           f"analyst snapshot fresh ({age_h:.0f}h old, {len(snap['players'])} players)",
           f"analyst snapshot stale or small: {age_h:.0f}h old, {len(snap['players'])} players")
+    # The matchup simulation counts games from the schedule inside the snapshot: this week must be there, with every team.
+    if IN_SEASON:
+        monday = (TODAY - timedelta(days=TODAY.weekday())).isoformat()
+        week = next((w for w in (snap.get("schedule") or {}).get("weeks", []) if w["start"] == monday), None)
+        n_teams = len(week["games"]) if week else 0
+        check(n_teams >= 28, f"analyst snapshot schedule covers week of {monday} ({n_teams} teams)",
+              f"analyst snapshot schedule missing or incomplete for week of {monday} ({n_teams} teams)")
+        has_made = any("fgm" in (p["seasons"][0]["averages"] if p["seasons"] else {}) for p in snap["players"][:50])
+        check(has_made, "analyst snapshot carries made shots", "analyst snapshot has no made-shot fields (fgm/ftm)")
 except Exception as e:
     check(False, "", f"analyst snapshot unreadable at {SNAPSHOT_URL}: {type(e).__name__}")
 
