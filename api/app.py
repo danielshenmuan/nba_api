@@ -93,15 +93,21 @@ def daily_leaders(
     low_owned: int = Query(default=0, ge=0, le=10, description="best only: also return this many 低持有專區 players (below low_owned_max_pct ownership, score >= low_owned_min_score) in `low_owned`"),
     low_owned_max_pct: float = Query(default=50.0, ge=0, le=100),
     low_owned_min_score: float = Query(default=3.0),
+    standout_pts: Optional[float] = Query(default=None, ge=0, description="worst only: drop players with at least this many points (a good stat means not a cold night)"),
+    standout_reb: Optional[float] = Query(default=None, ge=0, description="worst only: drop players with at least this many rebounds"),
+    standout_ast: Optional[float] = Query(default=None, ge=0, description="worst only: drop players with at least this many assists"),
 ):
     if low_owned and (mode != "best" or rank_by == "fv"):
         raise HTTPException(status_code=422, detail="low_owned needs mode=best and rank_by=social")
+    standouts = dict(standout_pts=standout_pts, standout_reb=standout_reb, standout_ast=standout_ast)
+    if mode != "worst" and any(v is not None for v in standouts.values()):
+        raise HTTPException(status_code=422, detail="standout_* filters need mode=worst")
     low = None
     if low_owned:
         pool = get_daily_leaders(game_date, 100, mode, min_minutes=min_minutes, rank_by=rank_by, min_roster_pct=min_roster_pct)
         leaders, low = split_low_owned(pool, limit, low_owned, low_owned_max_pct, low_owned_min_score)
     else:
-        leaders = get_daily_leaders(game_date, limit, mode, min_minutes=min_minutes, rank_by=rank_by, min_roster_pct=min_roster_pct)
+        leaders = get_daily_leaders(game_date, limit, mode, min_minutes=min_minutes, rank_by=rank_by, min_roster_pct=min_roster_pct, **standouts)
 
     payload = {
         "date": str(game_date),
@@ -110,6 +116,7 @@ def daily_leaders(
         "rank_by": rank_by,
         "min_roster_pct": 20.0 if (mode == "worst" and min_roster_pct is None) else (0.0 if min_roster_pct is None else min_roster_pct),
         "min_minutes": min_minutes,
+        **({"standout_filter": {k.removeprefix("standout_"): v for k, v in standouts.items() if v is not None}} if any(v is not None for v in standouts.values()) else {}),
         "leaders": leaders,
         **({"low_owned": low, "low_owned_rule": {"max_roster_pct": low_owned_max_pct, "min_social_score": low_owned_min_score}} if low is not None else {}),
     }

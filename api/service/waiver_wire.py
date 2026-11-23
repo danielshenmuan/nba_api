@@ -25,9 +25,9 @@ OUT_STATUSES = {"OUT", "INJURY_RESERVE", "SUSPENSION", "OUT_FOR_SEASON"}
 @dataclass(frozen=True)
 class Rules:
     min_games: int = 4              # games this season before a level means anything
-    own_min: float = 5.0            # roster % band: below this is deep bench noise
-    own_max: float = 50.0           # at or above this he is not a waiver pickup
-    min_minutes: float = 24.0       # average over the last 5 games (the gate that carried the backtest signal)
+    own_min: float = 0.0            # no floor on roster % (was 5; removed 2026-11-20)
+    own_max: float = 15.0           # at or above this he is not a waiver pickup (was 50; 30 on 2026-11-15; 15 on 2026-11-20, see PRD 4.1b)
+    min_minutes: float = 0.0        # no minutes gate (was 24 avg over last 5; removed 2026-11-20)
     top_k: int = 15                 # the "top group" (simulated: 15 gives ~3 posts a week; 10 is too tight)
     lag_days: int = 3               # compare with the top group this many days ago
     trend_min_rise: float = 5.0     # ownership points gained over the lag, to qualify on trend alone

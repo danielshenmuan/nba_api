@@ -138,6 +138,20 @@ def leader_query_plan(mode: str, rank_by: str = "fv", min_roster_pct=None) -> di
     }
 
 
+def standout_clause(pts=None, reb=None, ast=None) -> tuple[str, list[tuple[str, float]]]:
+    """SQL that drops any player with at least one standout stat (points >= pts, rebounds >= reb or assists >= ast).
+    A player with one good number did not have a cold night, whatever else went wrong. Pure, so it is unit-tested.
+    Returns (sql fragment starting with AND or empty, [(param_name, value)]). Unset thresholds are ignored."""
+    parts, params = [], []
+    for col, name, v in (("pts", "standout_pts", pts), ("reb", "standout_reb", reb), ("ast", "standout_ast", ast)):
+        if v is None:
+            continue
+        # NULL stats must not hide a player, so COALESCE to 0 (below any threshold)
+        parts.append(f"COALESCE(stats.{col}, 0) < @{name}")
+        params.append((name, float(v)))
+    return ("AND " + " AND ".join(parts) if parts else ""), params
+
+
 def split_low_owned(pool: list[dict], top_n: int, low_n: int, max_pct: float = 50.0, min_score: float = 3.0) -> tuple[list[dict], list[dict]]:
     """The hot list as "top N by score" plus a 低持有專區: the best `low_n` nights among players below `max_pct` ownership
     (unknown ownership counts as 0, like the ownership floor does) whose social score is at least `min_score`.
@@ -150,9 +164,11 @@ def split_low_owned(pool: list[dict], top_n: int, low_n: int, max_pct: float = 5
     return top, low
 
 
-def get_daily_leaders(date, limit=10, mode="best", min_minutes: float = 0, rank_by: str = "fv", min_roster_pct=None):
+def get_daily_leaders(date, limit=10, mode="best", min_minutes: float = 0, rank_by: str = "fv", min_roster_pct=None,
+                      standout_pts=None, standout_reb=None, standout_ast=None):
     client = get_client()
     plan = leader_query_plan(mode, rank_by, min_roster_pct)
+    standout_sql, standout_params = standout_clause(standout_pts, standout_reb, standout_ast)
 
     requested_columns: list[tuple[str, bool]] = [
         ("player_id", True),
@@ -211,6 +227,7 @@ def get_daily_leaders(date, limit=10, mode="best", min_minutes: float = 0, rank_
     WHERE stats.game_date = @date
       AND {minutes_expr} >= @min_minutes
       AND COALESCE(own.roster_pct, 0) >= @min_roster_pct
+      {standout_sql}
     ORDER BY stats.{plan["score"]} {plan["direction"]}
     LIMIT @limit
     """
@@ -221,6 +238,7 @@ def get_daily_leaders(date, limit=10, mode="best", min_minutes: float = 0, rank_
             bigquery.ScalarQueryParameter("limit", "INT64", limit),
             bigquery.ScalarQueryParameter("min_minutes", "FLOAT64", float(min_minutes)),
             bigquery.ScalarQueryParameter("min_roster_pct", "FLOAT64", plan["min_roster_pct"]),
+            *[bigquery.ScalarQueryParameter(n, "FLOAT64", v) for n, v in standout_params],
         ]
     )
     df = client.query(query, job_config=job_config).to_dataframe()

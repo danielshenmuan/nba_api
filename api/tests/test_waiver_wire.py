@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from service.waiver_wire import (Rules, candidate_pool, player_levels, render_en, render_zh, top_group, waiver_wire)  # noqa: E402
+from service.waiver_wire import (DEFAULT_RULES, Rules, candidate_pool, player_levels, render_en, render_zh, top_group, waiver_wire)  # noqa: E402
 
 AS_OF = date(2026, 11, 10)
 
@@ -59,13 +59,16 @@ class TestPool:
 
     def test_gates(self):
         lv = self.base()
-        o = own([(1, 4.9), (2, 5.0), (3, 20.0), (4, 20.0), (5, 20.0), (6, 50.0), (7, 49.9), (8, 20.0, "OUT")])
+        o = own([(1, 4.9), (2, 5.0), (3, 10.0), (4, 10.0), (5, 10.0), (6, 15.0), (7, 14.9), (8, 10.0, "OUT")])
         got = set(candidate_pool(lv, o, AS_OF).index)
-        assert got == {2, 7}            # 1: <5%, 3: 3 games, 4: 23.9 min, 5: last game 12 days ago, 6: 50%, 8: out
+        assert got == {1, 2, 4, 7}      # no ownership floor and no minutes gate (removed 2026-11-20); 3: 3 games, 5: last game 12 days ago, 6: 30%, 8: out
+
+    def test_default_cap_is_15(self):
+        assert DEFAULT_RULES.own_max == 15.0
 
     def test_injury_status_missing_is_fine(self):
         lv = self.base()
-        assert 1 in candidate_pool(lv, pd.DataFrame([dict(player_id=1, roster_pct=20.0)]), AS_OF).index
+        assert 1 in candidate_pool(lv, pd.DataFrame([dict(player_id=1, roster_pct=10.0)]), AS_OF).index
 
     def test_top_group_sorted_and_capped(self):
         lv = self.base(); lv["level"] = [1.0, 5.0, 3.0, 4.0, 2.0, 0.0, 6.0, 7.0]
@@ -85,8 +88,8 @@ def scenario():
     })
 
 
-NOW = own([(p, 20.0) for p in range(1, 9)])
-THEN = own([(p, 20.0) for p in range(1, 9)])
+NOW = own([(p, 5.0) for p in range(1, 9)])
+THEN = own([(p, 5.0) for p in range(1, 9)])
 
 
 class TestWaiverWire:
@@ -97,21 +100,21 @@ class TestWaiverWire:
         assert res.post_worthy
 
     def test_ownership_rise_with_level_qualifies_on_its_own(self):
-        now = own([(p, 20.0) for p in range(1, 9)]); now.loc[now.player_id == 5, "roster_pct"] = 28.0
+        now = own([(p, 5.0) for p in range(1, 9)]); now.loc[now.player_id == 5, "roster_pct"] = 13.0
         res = waiver_wire(scenario(), now, THEN, AS_OF, None, R)
         t = [r for r in res.risers if r["name"] == "Tango"][0]
         assert t["reasons"] == ["ownership_up"] and t["own_change"] == 8.0
 
     def test_big_ownership_rise_without_the_level_is_ignored(self):
-        now = own([(p, 20.0) for p in range(1, 9)]); now.loc[now.player_id == 6, "roster_pct"] = 40.0
+        now = own([(p, 5.0) for p in range(1, 9)]); now.loc[now.player_id == 6, "roster_pct"] = 14.0
         assert "Low" not in [r["name"] for r in waiver_wire(scenario(), now, THEN, AS_OF, None, R).risers]
 
     def test_small_rise_does_not_trigger(self):
-        now = own([(p, 20.0) for p in range(1, 9)]); now.loc[now.player_id == 5, "roster_pct"] = 24.9
+        now = own([(p, 5.0) for p in range(1, 9)]); now.loc[now.player_id == 5, "roster_pct"] = 9.9
         assert "Tango" not in [r["name"] for r in waiver_wire(scenario(), now, THEN, AS_OF, None, R).risers]
 
     def test_a_player_in_both_reasons_lists_both(self):
-        now = own([(p, 20.0) for p in range(1, 9)]); now.loc[now.player_id == 4, "roster_pct"] = 30.0
+        now = own([(p, 5.0) for p in range(1, 9)]); now.loc[now.player_id == 4, "roster_pct"] = 14.0
         assert waiver_wire(scenario(), now, THEN, AS_OF, None, R).risers[0]["reasons"] == ["new_in_top_group", "ownership_up"]
 
     def test_not_enough_new_players_means_no_post(self):
@@ -131,7 +134,7 @@ class TestWaiverWire:
     def test_post_is_capped_at_max_in_post(self):
         spec = {i: dict(name=f"N{i}", games=steady(16.0, 5) + steady(0.0, 15, start=6)) for i in range(1, 9)}   # level 8.0 now, 3.2 three days ago
         spec.update({i: dict(name=f"S{i}", games=steady(7.0)) for i in range(20, 30)})                      # ten steady players at 7.0
-        o = own([(p, 20.0) for p in spec])
+        o = own([(p, 10.0) for p in spec])
         res = waiver_wire(games(spec), o, o, AS_OF, None, Rules(top_k=10, min_risers=1, min_days_into_season=0, max_in_post=5))
         assert len(res.risers) == 5
 
@@ -159,8 +162,8 @@ class TestText:
 
     def test_ownership_never_appears_in_any_text(self):
         """ESPN's roster % differs a lot from Yahoo's, so no percentage and no +N change is shown, whatever the data says."""
-        for pct in (6.0, 20.0, 31.0, 49.0):
-            now = own([(p, 20.0) for p in range(1, 9)]); now.loc[now.player_id == 4, "roster_pct"] = pct
+        for pct in (6.0, 8.0, 10.0, 14.0):
+            now = own([(p, 10.0) for p in range(1, 9)]); now.loc[now.player_id == 4, "roster_pct"] = pct
             for src in ("yahoo", "espn"):
                 for t in (render_zh(self.res(now), src), render_en(self.res(now), src)):
                     assert "%" not in t and "持有率" not in t and "擁有率" not in t and "rostered" not in t.lower()
@@ -197,7 +200,7 @@ class TestText:
 from service.waiver_wire import latest_snapshot, waiver_wire_for_day  # noqa: E402
 
 
-def snapshots(days=14, pct=20.0, players=range(1, 9)):
+def snapshots(days=14, pct=10.0, players=range(1, 9)):
     return pd.DataFrame([dict(player_id=p, roster_pct=pct, injury_status=None, snapshot_date=AS_OF - timedelta(days=i))
                          for i in range(days) for p in players])
 

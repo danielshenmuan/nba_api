@@ -83,3 +83,17 @@ def test_a_real_player_with_no_box_score_is_no_game_not_not_found():
     out = classify_missing({"lines": [], "not_found": ["Klay Thompson", "Nobody Atall", "Jaylen"], "ambiguous": []}, KNOWN)
     assert [g["player_name"] for g in out["no_game"]] == ["Klay Thompson"] and out["no_game"][0]["last_game_date"] == "2026-11-02"
     assert out["not_found"] == ["Nobody Atall"] and out["ambiguous"] == ["Jaylen"]
+
+
+def test_standout_clause_drops_anyone_with_one_good_stat():
+    from service.nba_fetch import standout_clause
+    sql, params = standout_clause(15, 8, 6)
+    assert sql == "AND COALESCE(stats.pts, 0) < @standout_pts AND COALESCE(stats.reb, 0) < @standout_reb AND COALESCE(stats.ast, 0) < @standout_ast"
+    assert params == [("standout_pts", 15.0), ("standout_reb", 8.0), ("standout_ast", 6.0)]
+
+
+def test_standout_clause_is_empty_when_unset_and_partial_when_some_set():
+    from service.nba_fetch import standout_clause
+    assert standout_clause() == ("", [])
+    sql, params = standout_clause(reb=8)
+    assert sql == "AND COALESCE(stats.reb, 0) < @standout_reb" and params == [("standout_reb", 8.0)]
