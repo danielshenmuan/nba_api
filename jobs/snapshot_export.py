@@ -120,6 +120,7 @@ def fetch_schedule(today: date, days: int = SCHEDULE_DAYS) -> tuple[dict | None,
     import requests
     start = monday_of(today)
     per_week: dict[str, dict[str, int]] = {}
+    tbd: dict[str, int] = {}   # games ESPN lists with an unannounced team ("TBD"), per week
     bad_weeks: set[str] = set()
     warnings: list[str] = []
     for i in range(days):
@@ -138,8 +139,15 @@ def fetch_schedule(today: date, days: int = SCHEDULE_DAYS) -> tuple[dict | None,
             for c in ev["competitions"][0]["competitors"]:
                 ab = c["team"]["abbreviation"]
                 ab = TEAM_ALIAS.get(ab, ab)
+                if ab == "TBD":
+                    tbd[wk] = tbd.get(wk, 0) + 1
+                    continue
                 games[ab] = games.get(ab, 0) + 1
-    weeks = [{"start": wk, "games": dict(sorted(g.items()))} for wk, g in sorted(per_week.items()) if wk not in bad_weeks and g]
+    weeks = [{"start": wk, "games": dict(sorted(g.items())), **({"tbd_slots": tbd[wk]} if tbd.get(wk) else {})}
+             for wk, g in sorted(per_week.items()) if wk not in bad_weeks and g]
+    for w in weeks:
+        if w.get("tbd_slots"):
+            warnings.append(f"schedule: week of {w['start']} has {w['tbd_slots']} team slots still TBD; counts for those teams may be low")
     if not weeks:
         return None, warnings + ["schedule: nothing fetched; publishing without it"]
     return {"source": "espn", "weeks": weeks}, warnings
