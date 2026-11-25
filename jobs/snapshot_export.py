@@ -48,11 +48,13 @@ WITH u AS (
   SELECT season, player_id, player_name, game_date, minute AS minutes,
          points AS pts, rebounds AS reb, assists AS ast, steals AS stl, blocks AS blk,
          three_p_made AS fg3m, fg_pct, ft_pct, turnovers, fg_attempts AS fga, ft_attempts AS fta,
-         fg_made AS fgm, ft_made AS ftm
+         fg_made AS fgm, ft_made AS ftm,
+         offensive_rebounds AS oreb, defensive_rebounds AS dreb, personal_fouls AS pf, three_p_attempts AS fg3a
   FROM `{T_HIST}` WHERE season IN UNNEST(@seasons)
   UNION ALL
   SELECT season, player_id, player_name, game_date, minutes,
-         pts, reb, ast, stl, blk, fg3m, fg_pct, ft_pct, turnovers, fga, fta, fgm, ftm
+         pts, reb, ast, stl, blk, fg3m, fg_pct, ft_pct, turnovers, fga, fta, fgm, ftm,
+         oreb, dreb, pf, fg3a
   FROM `{T_ESPN}` WHERE season IN UNNEST(@seasons)
 )
 SELECT season, player_id,
@@ -61,7 +63,13 @@ SELECT season, player_id,
        AVG(pts) AS pts, AVG(reb) AS reb, AVG(ast) AS ast, AVG(stl) AS stl, AVG(blk) AS blk, AVG(fg3m) AS fg3m,
        AVG(fg_pct) AS fg_pct, AVG(ft_pct) AS ft_pct, AVG(turnovers) AS turnovers,
        AVG(COALESCE(fga, 0)) AS fga, AVG(COALESCE(fta, 0)) AS fta,
-       AVG(COALESCE(fgm, 0)) AS fgm, AVG(COALESCE(ftm, 0)) AS ftm
+       AVG(COALESCE(fgm, 0)) AS fgm, AVG(COALESCE(ftm, 0)) AS ftm,
+       AVG(oreb) AS oreb, AVG(dreb) AS dreb, AVG(pf) AS pf, AVG(fg3a) AS fg3a,
+       -- double-double: any two of pts/reb/ast/stl/blk at 10 or more; triple-double: any three. A game counts only when all five are known.
+       AVG(IF(pts IS NULL OR reb IS NULL OR ast IS NULL OR stl IS NULL OR blk IS NULL, NULL,
+              IF(IF(pts >= 10, 1, 0) + IF(reb >= 10, 1, 0) + IF(ast >= 10, 1, 0) + IF(stl >= 10, 1, 0) + IF(blk >= 10, 1, 0) >= 2, 1, 0))) AS dd_rate,
+       AVG(IF(pts IS NULL OR reb IS NULL OR ast IS NULL OR stl IS NULL OR blk IS NULL, NULL,
+              IF(IF(pts >= 10, 1, 0) + IF(reb >= 10, 1, 0) + IF(ast >= 10, 1, 0) + IF(stl >= 10, 1, 0) + IF(blk >= 10, 1, 0) >= 3, 1, 0))) AS td_rate
 FROM u
 WHERE minutes > 0 AND player_id IS NOT NULL
 GROUP BY season, player_id
@@ -76,6 +84,8 @@ GROUP BY player_id
 
 # fgm / ftm are made shots per game. A team's FG% / FT% is made / attempted, which is how leagues score it;
 # fg_pct / ft_pct (mean of per-game percentages) are kept for compatibility but understate players with 0-attempt games.
+# Optional extras (per game; dd_rate / td_rate are the share of games). Left out for a season where the source has no value.
+EXTRA_STATS = ["oreb", "dreb", "pf", "fg3a", "dd_rate", "td_rate"]
 STATS = ["pts", "reb", "ast", "stl", "blk", "fg3m", "fg_pct", "ft_pct", "turnovers", "fga", "fta", "fgm", "ftm"]
 
 ESPN_SCOREBOARD = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard"
@@ -164,7 +174,8 @@ def build(rows: list[dict], reference: str, season_order: list[str], aliases: di
         p = by_id.setdefault(int(r["player_id"]), {"id": int(r["player_id"]), "name": r["name"], "seasons": []})
         p["seasons"].append({
             "season": r["season"], "gp": int(r["gp"]), "mpg": round(float(r["mpg"]), 2),
-            "averages": {k: round(float(r[k] or 0), 4) for k in STATS},
+            "averages": {**{k: round(float(r[k] or 0), 4) for k in STATS},
+                         **{k: round(float(r[k]), 4) for k in EXTRA_STATS if r[k] is not None}},
         })
     # Only players with a game in the reference season or the season in progress can be asked about.
     recent = {season_order[0], reference}
