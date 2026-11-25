@@ -43,8 +43,8 @@ upsert_job() {  # name script args timeout
     --set-env-vars "PROJECT_ID=${PROJECT_ID}" ${extra[@]+"${extra[@]}"}
 }
 
-upsert_schedule() {  # job_name schedule
-  local job="$1" cron="$2" sched="${1}-schedule"
+upsert_schedule() {  # job_name schedule [schedule_name]
+  local job="$1" cron="$2" sched="${3:-${1}-schedule}"
   local uri="https://run.googleapis.com/v2/projects/${PROJECT_ID}/locations/${REGION}/jobs/${job}:run"
   local flags=(--project "${PROJECT_ID}" --location "${REGION}" --schedule "${cron}"
                --time-zone "America/New_York" --uri "${uri}" --http-method POST
@@ -60,7 +60,8 @@ upsert_job nba-espn-ingest espn_ingest.py daily 900s
 upsert_schedule nba-espn-ingest "15 1 * * *"     # 01:15 ET; re-ingests the last two days, so a late finish is picked up the next night
 
 upsert_job nba-snapshot-export snapshot_export.py "--out,gs://fantasy-survivors-analyst-data/snapshot.json" 300s
-upsert_schedule nba-snapshot-export "20 1 * * *"   # 01:20 ET: after the 01:15 ingest (900s timeout, so give it time) and before the 01:25 social flows
+upsert_schedule nba-snapshot-export "20 1 * * 0,1,2,4,5,6"   # 01:20 ET except Wednesday: after the 01:15 ingest (900s timeout, so give it time) and before the 01:25 social flows
+upsert_schedule nba-snapshot-export "45 1 * * 3" nba-snapshot-export-wed-schedule   # Wednesday (after Tuesday night's games) runs later, 01:45 ET
 
 HC_EXTRA=()
 if gcloud secrets describe discord-webhook-url --project "${PROJECT_ID}" >/dev/null 2>&1; then
