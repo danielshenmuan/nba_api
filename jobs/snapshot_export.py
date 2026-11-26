@@ -13,6 +13,9 @@ Definitions match production (league_pg_stats_by_season) so the numbers agree wi
   - seasons are newest first; reference_season = the last COMPLETED season (e.g. 2025-26 in Nov 2026)
   - the season in progress and the three before the reference are included: 4 seasons at most
 
+Schedule: `schedule.weeks` (games per team, next 4 fantasy weeks) and `schedule.days` / `tbd_days` (date -> teams playing,
+through mid-April) from ESPN's scoreboard; weeks are the same numbers as before.
+
 Sources: player_historical_game_stats (2021-22 .. 2024-25) UNION player_daily_game_stats_espn (2025-26 on).
 
 Usage
@@ -90,7 +93,8 @@ STATS = ["pts", "reb", "ast", "stl", "blk", "fg3m", "fg_pct", "ft_pct", "turnove
 
 ESPN_SCOREBOARD = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard"
 ESPN_UA = {"User-Agent": "fantasy-survivors-ingest/1.0 (non-commercial hobby project)"}
-SCHEDULE_DAYS = 28   # four fantasy weeks from this Monday: the matchup week plus three ahead
+SCHEDULE_DAYS = 28   # four fantasy weeks from this Monday: the matchup week plus three ahead (the `weeks` counts)
+MAX_SCHEDULE_DAYS = 200   # cap on the day-by-day `days` horizon
 # ESPN's scoreboard abbreviations differ from the game tables for six teams.
 TEAM_ALIAS = {"GS": "GSW", "NO": "NOP", "NY": "NYK", "SA": "SAS", "UTAH": "UTA", "WSH": "WAS"}
 
@@ -121,46 +125,107 @@ def monday_of(d: date) -> date:
     return d - timedelta(days=d.weekday())
 
 
-def fetch_schedule(today: date, days: int = SCHEDULE_DAYS) -> tuple[dict | None, list[str]]:
-    """Games per team per fantasy week (Monday to Sunday), from ESPN's scoreboard, one request per day.
-
-    Returns (schedule, warnings). A failed day leaves that whole week out rather than reporting a wrong count;
-    if nothing could be fetched the schedule is None and the snapshot is published without it (the engine then
-    assumes an average week and says so)."""
+def fetch_day(d: date) -> tuple[list[str], int]:
+    """(teams playing, TBD team slots) on one date from ESPN's scoreboard. Retries once; raises if both tries fail."""
     import requests
-    start = monday_of(today)
-    per_week: dict[str, dict[str, int]] = {}
-    tbd: dict[str, int] = {}   # games ESPN lists with an unannounced team ("TBD"), per week
-    bad_weeks: set[str] = set()
-    warnings: list[str] = []
-    for i in range(days):
-        d = start + timedelta(days=i)
-        wk = monday_of(d).isoformat()
+    last: Exception | None = None
+    for _ in range(2):
         try:
             r = requests.get(ESPN_SCOREBOARD, params={"dates": d.strftime("%Y%m%d")}, headers=ESPN_UA, timeout=30)
             r.raise_for_status()
-            events = r.json()["events"]
-        except Exception as e:  # noqa: BLE001 - any failure invalidates that week only
-            bad_weeks.add(wk)
-            warnings.append(f"schedule: {d} failed ({type(e).__name__}); week of {wk} left out")
-            continue
+            teams: list[str] = []
+            tbd = 0
+            for ev in r.json()["events"]:
+                for c in ev["competitions"][0]["competitors"]:
+                    ab = TEAM_ALIAS.get(c["team"]["abbreviation"], c["team"]["abbreviation"])
+                    if ab == "TBD":
+                        tbd += 1
+                    else:
+                        teams.append(ab)
+            return sorted(teams), tbd
+        except Exception as e:  # noqa: BLE001
+            last = e
+    raise last  # type: ignore[misc]
+
+
+def horizon_days(today: date) -> int:
+    """Days of day-by-day schedule to fetch: through mid-April (end of the regular season), at least SCHEDULE_DAYS."""
+    season_end = date(today.year if today.month <= 6 else today.year + 1, 4, 15)
+    return min(max((season_end - monday_of(today)).days + 1, SCHEDULE_DAYS), MAX_SCHEDULE_DAYS)
+
+
+def schedule_from_days(day_games: dict[str, tuple[list[str], int]], failed: set[str], start: date,
+                       week_days: int = SCHEDULE_DAYS) -> tuple[dict | None, list[str]]:
+    """Build the snapshot schedule from per-date results (date -> (teams, tbd slots)); `failed` dates had no answer.
+
+    `weeks`: games per team per fantasy week (Monday-Sunday) for the first `week_days` days; a week with a failed day is
+    left out rather than reported wrong. `days`: date -> teams playing (off days absent; a date with only TBD slots is []), tbd_days: date -> TBD slots.
+    A date missing from `days` means "no games", so `days` stops before the first failed date instead of having a hole."""
+    warnings: list[str] = []
+    week_end = start + timedelta(days=week_days)
+    per_week: dict[str, dict[str, int]] = {}
+    tbd: dict[str, int] = {}
+    bad_weeks = {monday_of(date.fromisoformat(f)).isoformat() for f in failed if date.fromisoformat(f) < week_end}
+    for f in sorted(failed):
+        wk = monday_of(date.fromisoformat(f)).isoformat()
+        warnings.append(f"schedule: {f} failed" + ("; week of " + wk + " left out" if wk in bad_weeks else "")
+                        + ("; day-by-day schedule stops before it" if f == min(failed) else ""))
+    for ds in sorted(day_games):
+        d = date.fromisoformat(ds)
+        if d >= week_end:
+            break
+        teams, n_tbd = day_games[ds]
+        wk = monday_of(d).isoformat()
         games = per_week.setdefault(wk, {})
-        for ev in events:
-            for c in ev["competitions"][0]["competitors"]:
-                ab = c["team"]["abbreviation"]
-                ab = TEAM_ALIAS.get(ab, ab)
-                if ab == "TBD":
-                    tbd[wk] = tbd.get(wk, 0) + 1
-                    continue
-                games[ab] = games.get(ab, 0) + 1
+        for t in teams:
+            games[t] = games.get(t, 0) + 1
+        if n_tbd:
+            tbd[wk] = tbd.get(wk, 0) + n_tbd
     weeks = [{"start": wk, "games": dict(sorted(g.items())), **({"tbd_slots": tbd[wk]} if tbd.get(wk) else {})}
              for wk, g in sorted(per_week.items()) if wk not in bad_weeks and g]
     for w in weeks:
         if w.get("tbd_slots"):
             warnings.append(f"schedule: week of {w['start']} has {w['tbd_slots']} team slots still TBD; counts for those teams may be low")
-    if not weeks:
+    first_failed = min(failed) if failed else None
+    days = {ds: teams for ds, (teams, n) in sorted(day_games.items()) if (teams or n) and (first_failed is None or ds < first_failed)}
+    tbd_days = {ds: n for ds, (_, n) in sorted(day_games.items()) if n and (first_failed is None or ds < first_failed)}
+    if not weeks and not days:
         return None, warnings + ["schedule: nothing fetched; publishing without it"]
-    return {"source": "espn", "weeks": weeks}, warnings
+    sched: dict = {"source": "espn", "weeks": weeks}
+    if days:
+        sched["days"] = days
+        if tbd_days:
+            sched["tbd_days"] = tbd_days
+    return sched, warnings
+
+
+def fetch_schedule(today: date, days: int | None = None) -> tuple[dict | None, list[str]]:
+    """Games per team per fantasy week (the next SCHEDULE_DAYS days from this Monday) plus the day-by-day schedule
+    (`days`, through mid-April), from ESPN's scoreboard, one request per day.
+
+    Returns (schedule, warnings). A failed day leaves that whole week out of `weeks` rather than reporting a wrong count;
+    if nothing could be fetched the schedule is None and the snapshot is published without it (the engine then
+    assumes an average week and says so)."""
+    from concurrent.futures import ThreadPoolExecutor
+    start = monday_of(today)
+    n = days if days is not None else horizon_days(today)
+    dates = [start + timedelta(days=i) for i in range(n)]
+
+    def one(d: date):
+        try:
+            return d, fetch_day(d), None
+        except Exception as e:  # noqa: BLE001 - any failure invalidates that day only
+            return d, None, e
+
+    day_games: dict[str, tuple[list[str], int]] = {}
+    failed: set[str] = set()
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        for d, res, err in ex.map(one, dates):
+            if err is not None:
+                failed.add(d.isoformat())
+            else:
+                day_games[d.isoformat()] = res
+    return schedule_from_days(day_games, failed, start)
 
 
 def build(rows: list[dict], reference: str, season_order: list[str], aliases: dict[str, str],
